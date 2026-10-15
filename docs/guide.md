@@ -109,13 +109,36 @@ Several sessions can run at once. Each session writes its own `~/.claude/crew-gr
 | Right-drag | Rotate the camera |
 | Wheel | Zoom |
 | Ctrl+wheel, or drag the corner grip | Resize (the grip shows whenever the pointer is in the window) |
-| Right-click a character | **Character >** (Match role, Random and every character, yours included, as radio items: the choice applies to this agent's type), **Only this agent** (a check box: ticked, the choice is for this one agent), Show in Crew pane, and the window options with **Settings…** |
-| Right-click a file or elsewhere | Show in Crew pane (a file's focus panel), Open, Show in folder, Copy path, and the window options with **Settings…** |
+| Right-click a character | **Character >** (Match role, Random and every character, yours included, as radio items: the choice applies to this agent's type), **Only this agent** (a check box: ticked, the choice is for this one agent), **Ask Claude…** (about that agent), Show in Crew pane, **Dismiss** (a finished agent) or **Ask Claude to stop it** (a running one), and the window options with **Settings…** |
+| Right-click a file or elsewhere | Show in Crew pane (a file's focus panel), Open, Show in folder, Copy path, **Ask Claude…** (about nothing in particular), **Dismiss all finished**, and the window options with **Settings…** |
 | Double-click | Refit the camera |
 
 Where the picture is transparent, clicks go through to the desktop. The page reads the alpha under the pointer, with a two-miss hysteresis, and never lets clicks through while a drag or a resize runs. The crabs turn their eyes toward a near pointer, blink, shuffle, doze with `zZ` when the session is idle for two minutes (or not running), and wake with a stretch. The window draws about 30 frames a second while something moves and about 12 when idle. When the pet hands a file to its viewer (Open, Show in folder) it ends any drag in flight and keeps itself on top of the viewer's new window for about 15 seconds, without taking the focus; "Show" in the tray raises it too.
 
 Each working crab shows a small speech bubble with what it does (`✎ app.js`, `» npm test`, `? register`). An optional ticker at the bottom (tray menu, "Activity ticker") lists the last three events for about six seconds each.
+
+### Ask Claude from the pet
+
+Right-click a character, the name pill or empty space and choose **Ask Claude…** (the tray has it in each session's submenu). A small dark card opens in the pet window with a text box (up to 4000 characters) and two buttons: **Send** (Ctrl+Enter) puts the question to Claude as a turn of its own, once the session is idle; **Put in prompt box** only writes it into the prompt box as a draft (below what you had typed there, if anything). Esc closes the card and keeps what you typed. Asked from a character, the question goes with a short context block about that agent: its type, id, status and task, its last 5 events and the files it touched. Asked from the pill or empty space, it goes alone.
+
+The pet window cannot take the keyboard otherwise (it never steals focus from your editor): it becomes focusable only while the card is open, and not focusable again when it closes. A collapsed window opens up first.
+
+After **Send** the main character shows a small `✉ sent` bubble. When the turn that came from the pet ends, the main character says the first words of the answer (about 200 cells, credentials masked) in a speech bubble for 12 s, and the ticker shows it; click the bubble for the whole clipped text. Turns that did not come from the pet never produce a bubble, even if one ends first.
+
+What the mod does with it, and why it is hard to abuse:
+- **Framed.** The mod submits with `$.prompt.submit` and never `asUser`, so Claude reads it as a message from the crew-graph plugin ("The crew-graph plugin sent a message: …"), not as your own words. The text is yours, typed in the card; nothing else the pet shows (file contents, other agents' text) is added to it except the context block above.
+- **Token and session.** The mod makes a random token when it launches a pet window for a session and passes it to the window (`--token`; a second `/crew pet` hands a new one to the running window, which is also how a window picks up the new token after `/reload-plugins`). The window writes it, with the session id, into every request in its inbox file (`overlay/pet-inbox-<session id>.json`); the page itself never sees it. The mod acts on an ask, a dismiss or a stop only from its own session's inbox, only with that session id and that token, and logs and ignores anything else (a stale or foreign file, another session, a wrong or missing token, an empty or over-long text, an agent id it does not have).
+- **One at a time.** Requests go to the inbox at least 1.3 s apart, so a question followed at once by a dismissal loses neither.
+- **A reload does not strand the pet.** `/crew pet` records in the session's state that the pet is on (`/crew pet off` and `/crew pet off all` clear it). When the session starts again (after `/reload-plugins`, or when it is resumed) and the mark is set, the mod starts the pet the same way `/crew pet` does: a new token, handed to the window that is already running, and the inbox poll resumes.
+- **Delivered or not.** Every request the mod accepts is acknowledged in the snapshot (`petAck`, the request's sequence number). The `✉ sent` bubble stays until then; with no acknowledgement within 8 s (no live mod behind the window, an older mod, a mod that refused the token) it turns into a red `✉ not delivered: run /crew pet`, with a line in the ticker.
+
+### Dismiss finished agents
+
+Right-click an agent that has finished, failed, was stopped, or sits idle or waiting with no work running: **Dismiss**. It waves goodbye and pops away in a puff. **Dismiss all finished** (right-click anywhere) does it for every such agent in the window. The mod keeps a per-session set of dismissed agents and leaves them, their events, their log lines and the file links only they made out of the snapshot and the Crew pane. An agent that works again (a step, a tool call, a new end) is shown again by itself; `/clear` forgets the set. The set records only what each agent looked like when it was dismissed.
+
+A running agent has no Dismiss. Its menu has **Ask Claude to stop it**: the mod's plugin API has no call that stops an agent (`$.agent` can spawn, list and register agents, and `$.turn.abort` ends only the main loop's turn), so it submits a framed request naming the agent's id and type and asks Claude to stop it (Claude can, with its own TaskStop tool). That also keeps the stop in the transcript, where you see it. Like any submitted prompt it waits until the session is idle, so a long main turn delays it.
+
+**Auto-dismiss** (Settings, *Agents*): off by default; after 5, 10 or 30 minutes a finished agent is dismissed by itself. The mod reads `autoDismiss` from `pet-settings.json` about every 10 s, tolerantly (a missing or unreadable file, or any other value, means off).
 
 The tray icon (a crab) offers Show, **Settings…**, Always on top, Activity ticker, Reset position & size, a list of the open sessions (Show, Close) and Quit. Window positions and sizes are kept per session in `~/.claude/crew-graph/overlay/overlay-state.json`.
 
@@ -128,6 +151,7 @@ Right-click anything and choose **Settings…**, or use the tray icon. It opens 
 - **Characters.** A *default for all agents* (a character, **Match role (auto)**, **Random**, or follow the `characters` option), each character as a tile with a live 3D preview (the same character code, idling; your own characters appear too), a character per *agent type* (the types seen in your sessions, `main`, and `*` for any other type) and one for a single *agent*. The right-click menu on a character sets the same things. When a character changes, the old one spins away, a puff of smoke, and the new one pops in.
 - **Show.** Speech bubbles, the activity ticker, file papers and the nameplate, each on or off.
 - **Motion.** *Reduce motion* turns off the idle shuffles, drops the particle bursts and caps the frame rate lower (about 15 busy, 6 idle).
+- **Agents.** *Auto-dismiss finished agents* after 5, 10 or 30 minutes, or off.
 - **Window.** Always on top, opacity (60 to 100 %), a size preset S, M or L (besides dragging the grip), and **Reset to defaults**.
 
 The pet keeps these in `~/.claude/crew-graph/overlay/pet-settings.json`; only the pet's main process reads, checks (every key) and writes it, and it never writes `~/.claude/settings.json`. For each agent the character comes from, first match wins: its own entry, the pet's rule for its type (specific types first, `*` last), the mod's `characters` option, the pet's default. With no default and no option an agent is a crab.
@@ -137,7 +161,7 @@ The pet keeps these in `~/.claude/crew-graph/overlay/pet-settings.json`; only th
 ```json
 { "default": "auto", "types": { "Explore": "cat", "*": "auto" }, "agents": { "<session id>|<agent id>": "robot" },
   "show": { "bubbles": true, "ticker": true, "papers": true, "nameplate": true },
-  "reduceMotion": false, "alwaysOnTop": true, "opacity": 100, "size": "M" }
+  "reduceMotion": false, "alwaysOnTop": true, "opacity": 100, "size": "M", "autoDismiss": 0 }
 ```
 
 `/crew characters` prints what it says about characters (or that there is none yet) and what `auto` would pick for the agents of the latest snapshot, with the reason. To try the Settings window without a session: `electron overlay/main.js --page web/index.html --state <dir> --shot-settings out.png --demo`.
@@ -229,13 +253,13 @@ The default `panels` value is `3d,main,crew,architect,gate,agents,loops,receipt,
 
 ## What it can reach
 
-The mod only watches: every hook passes its event on unchanged, and a hook that throws passes the event on. It does reach outside the session in three places:
+The mod mostly watches: every hook passes its event on unchanged, and a hook that throws passes the event on. The one thing it does for you is what you ask in the pet's **Ask Claude…** card and its **Ask Claude to stop it** entry: it then submits a prompt, framed as coming from the plugin, with your text (see [Ask Claude from the pet](#ask-claude-from-the-pet)). It never submits anything else, and never kills an agent itself. It does reach outside the session in three places:
 - **Files:** it writes files only under `~/.claude/crew-graph/` (this includes the `characters/` folder with its `README.txt`, the `characters-user.js` manifest and `characters-glb/` parts, written from the files you put there), and only after `/crew web` or `/crew pet` or `/crew characters reload` (or `webOnStart`, `petOnStart`). The pet's own window state, its quit and close requests and its "show in Crew pane" requests live in `~/.claude/crew-graph/overlay/`.
 - **Processes:** it starts the OS "open" command (`explorer`, `open` or `xdg-open`), or `orca tab create` inside Orca, when `/crew web` opens the page. With `/crew 3d` it also starts `node bin/crew-3d.mjs`, which starts a headless browser and listens on 127.0.0.1 (token-protected) for the pane's pointer input. With `/crew pet` it runs `npm install electron@44.4.5` (and Electron's own binary download) once, into `~/.claude/crew-graph/overlay-runtime/`, then `node overlay/launch.mjs`, which starts Electron detached, so the pet outlives the session. The pet opens a file (`orca file open`, or the OS) only when you click it, and only a file listed in that session's snapshot; it reads at most the first 64 KB of such a file, for the hover summary.
 - **Network:** none from the mod or the viewer. three.js r158 is bundled in `web/three.min.js` (MIT). Installing Electron downloads it from npm and from Electron's release host, once.
 
 What it keeps:
-- **`overlay/pet-settings.json`:** the pet's settings (characters per type and per agent, what is shown, motion, window). Written by the pet process only, with a temp file and a rename; `<session id>|<agent id>` keys are the only session ids in it.
+- **`overlay/pet-settings.json`:** the pet's settings (characters per type and per agent, what is shown, motion, window, auto-dismiss). Written by the pet process only, with a temp file and a rename; `<session id>|<agent id>` keys are the only session ids in it.
 - **Session state:** short summaries (tool name plus path or command, with credentials masked), which end with the session.
 - **`data.js` and `sessions/<id>.js`:** the folder's basename, agent descriptions, the session's first prompt (shortened to about 32 characters, credentials masked), file paths relative to the session folder, and short event texts. Each file also lists its absolute path (`abs`) and the session folder's full path (`cwdAbs`), so the pet can open and summarize files. Both files are local, under your home.
 

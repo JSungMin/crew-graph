@@ -542,7 +542,7 @@ function makeCrab(d) {
   const cur = {}; POSE_KEYS.forEach((k) => { cur[k] = 0; }); cur.eyeSY = 1; cur.sq = 1; cur.aL = cur.aR = -0.25;
   const a = { id: d.id, d, s0, s: s0, cs: 1, h: 2.7 * s0, root, body, shadow, ring, fx, label, labelKey: '', ch: null, chId: '', wantId: 'crab', bn: {}, base: new T.Color(), hat: null, page: null, pageMat: null, anten: null, tipMat: null,
     re: newReact(), mood: { pets: 0, pinches: 0 }, bub: overlay ? makeBubble() : null, look: 0, dim: 0, hiddenN: 0, chip: null, mo: 0, byPrev: 0, earV: 0, sp: newSprings(),
-    pos: new T.Vector3(), tgt: new T.Vector3(), cur, enterT: nowS(), born: nowS(), lastVerb: '', tintF: 0, yaw: 0, ph: (hash(d.id) % 628) / 100, depth: 0, ang: 0, lv: 1 };
+    pos: new T.Vector3(), tgt: new T.Vector3(), cur, enterT: nowS(), born: nowS(), lastVerb: '', bye: 0, byeDone: false, gone: false, goneAt: 0, tintF: 0, yaw: 0, ph: (hash(d.id) % 628) / 100, depth: 0, ang: 0, lv: 1 };
   a.pick = charPickFor(d); a.wantId = a.pick.id;
   mountWanted(a);
   if (!a.ch) mountChar(a, CHARS.get('crab')); // a GLB still loading: the crab stands in, then the model replaces it
@@ -711,6 +711,12 @@ function updateCrab(a, dt, t, camPos) {
   a.label.sp.position.set(a.pos.x, a.s * (tp + 5.8) + 0.4, a.pos.z);
   a.ring.visible = !!(selected === a.id || (hover && hover.o === a));
   if (a.bub) updateBubble(a, v, dt);
+  if (a.bye) {
+    const kk = a.byeDone ? clamp(1 - (now - a.bye - 1.0) / 0.2, 0, 1) : 1;
+    a.root.scale.multiplyScalar(Math.max(0.001, kk));
+    a.root.visible = !(a.gone && kk <= 0.001);
+    if (a.gone && a.bub) a.bub.sp.visible = false;
+  }
 }
 const s01 = (x) => x * 0.5 + 0.5;
 
@@ -866,6 +872,15 @@ function reactCrab(a, v, dt, now) {
   if (uh >= 0 && uh < 0.55) {
     const h = Math.sin(Math.PI * uh / 0.55);
     R.by += (embed ? 2.1 : 1.5) * fl * h; R.sy *= 1 + 0.1 * fl * h; R.happy = true;
+  }
+  if (a.bye) { // dismissed from the pet: waves goodbye with the right claw, then pops away in a puff (updateCrab shrinks it)
+    const ub = now - a.bye;
+    if (ub >= 0 && ub < 1.0) { R.dR += 1.0 + 0.4 * Math.sin(ub * 22); R.happy = true; R.by += 0.45 * Math.abs(Math.sin(ub * 6)); }
+    else if (ub >= 1.0 && !a.byeDone) {
+      a.byeDone = true; a.gone = true; a.goneAt = now;
+      for (let i = 0; i < 6; i++) spawnRfx('puff', a, i * 0.04);
+      burst('a:' + a.id, 0xffffff, 14);
+    }
   }
   if (overlay || preview) petCrab(a, v, dt, now, R);
   return R;
@@ -1279,6 +1294,8 @@ function syncScene(s) {
       a.pos.copy(par ? par.pos : a.tgt);
     } else {
       a.d = d;
+      // Dismissed in the pet but still in the data: the mod has not taken it yet (or never will). Back after 9 s, at once if it works again.
+      if (a.gone && (d.status === 'running' || d.status === 'pending' || nowS() - a.goneAt > 9)) unGone(a);
       const arch = !!d.isArchitect; if (a.hat.visible !== arch) a.hat.visible = arch;
       const pk = charPickFor(d); a.pick = pk; if (pk.id !== a.wantId) { a.wantId = pk.id; mountWanted(a); }
     }
@@ -1306,6 +1323,9 @@ function syncScene(s) {
 
 // The Settings window lists the agent types in play: tell the main process what this window shows (when it changes).
 let seenSig = '';
+function unGone(a) {
+  a.bye = 0; a.byeDone = false; a.gone = false; a.root.visible = true; a.re.hopT = nowS();
+}
 function reportSeen() {
   if (!pet || !pet.seen) return;
   const list = [...agents.values()].map((a) => ({ id: a.id, type: typeKeyOf(a), description: a.d.description || '' }));
@@ -1346,7 +1366,7 @@ function applySnapshot(s, fromDemo) {
     try { syncScene(s); processEvents(Array.isArray(s.events) ? s.events : [], s.now || Date.now()); }
     catch (err) { if (window.console) console.error('crew-graph scene', err); }
   }
-  if (overlay) { noteData(s); return; }
+  if (overlay) { noteData(s); noteReply(s); noteAck(s); return; }
   renderHud(s);
 }
 // The assignment ("main=crab, Explore=bunny, *=random") arrives parsed in the snapshot as [[who, character], ...]
@@ -1398,7 +1418,7 @@ function pick(px, py) {
   };
   files.forEach((f) => { if (!f.hidden) test(f, 22, 0); });
   agents.forEach((a) => { if (a.chipObj && a.chip && a.chip.sp.visible) test(a.chipObj, 22, 0); });
-  agents.forEach((a) => test(a, crabRadius(a), 12));
+  agents.forEach((a) => { if (!a.gone) test(a, crabRadius(a), 12); });
   return best;
 }
 const crabRadius = (a) => clamp(a.s * 160 * a.ch.hitR / Math.max(0.3, (cam.dist / 24)), 24, 70);
@@ -1564,7 +1584,7 @@ function schedule(ms) {
 }
 function kick() { if (overlay && frameTimer) schedule(0); }
 function isBusy(n) {
-  if (n < busyUntil || ptr.down || carry || sizing || overContent || particles.length || rfx.length || effects.length || shake.W > 0.03) return true;
+  if (n < busyUntil || askIsOpen || n < bubbleUntil || ptr.down || carry || sizing || overContent || particles.length || rfx.length || effects.length || shake.W > 0.03) return true;
   return !dozing && sessionRunning(); // working crabs animate smoothly
 }
 function sessionRunning() {
@@ -1615,6 +1635,8 @@ function overlayStep(dt, now) {
   shakeStep(dt, now);
   // The grip is up whenever the pointer is in the window (it moved lately), so it can always be reached.
   document.body.classList.toggle('hot', now < hotUntil || sizing || (ptr.mx >= 0 && now - lastMoveAt < 4));
+  placeBubble();
+  checkAck();
 }
 
 /* ---- shaking the window: the carry velocity (px/s) the main process sends, its direction reversals, and springs that make limbs follow through */
@@ -1906,6 +1928,114 @@ function tickerEvent(e) {
   if (t) tickerPush(clipStr(t, 60), KCOL[e.kind]);
 }
 
+/* ---- ask Claude from the pet: the ask card, the "sent" / reply bubble over the main character, the reply card.
+   The card is where the keyboard goes: while it is open the page tells the main process (pet.askFocus), which makes the window focusable. */
+const askEl = overlay ? $('ask') : null, askTa = overlay ? $('askTa') : null, rbub = overlay ? $('rbub') : null, replyEl = overlay ? $('reply') : null;
+let askIsOpen = false, askAgent = '', askText = '', bubbleUntil = 0, bubbleKind = '', replyFull = '', replySeen = -1;
+function openAsk(id) {
+  if (!askEl || !pet || !pet.ask) return;
+  askAgent = id ? String(id) : '';
+  const a = askAgent ? agents.get(askAgent) : null;
+  $('askT').textContent = askAgent ? 'Ask Claude about ' + (a ? (a.id === 'main' ? 'main' : a.d.type || a.id) : clipStr(askAgent, 24)) : 'Ask Claude';
+  $('askS').textContent = a && a.d.description && a.id !== 'main' ? clipStr(a.d.description, 70) : askAgent ? '' : 'about the session';
+  askTa.value = askText;
+  askEl.style.display = 'block'; askIsOpen = true;
+  closeReply(); hideMore();
+  if (card) { card.style.display = 'none'; cardKey = ''; }
+  pet.askFocus(true);
+  setOver(true); needProbe = true; busyUntil = Math.max(busyUntil, nowS() + 1); kick();
+  setTimeout(() => { if (askIsOpen) askTa.focus(); }, 30);
+}
+function closeAsk() {
+  if (!askIsOpen) return;
+  askText = askTa.value;
+  askEl.style.display = 'none'; askIsOpen = false;
+  try { askTa.blur(); } catch (x) { /* ignore */ }
+  if (pet) pet.askFocus(false);
+  needProbe = true; kick();
+}
+function sendAsk(mode) {
+  const text = askTa.value.trim();
+  if (!text || text.length > 4000) return;
+  pet.ask({ mode, text, agentId: askAgent });
+  askText = ''; askTa.value = '';
+  closeAsk();
+  showBubble('sent', mode === 'draft' ? '\u270e in the prompt box' : '\u2709 sent', ACK_WAIT);
+}
+/* A request (ask, dismiss, stop) is delivered when the snapshot's petAck reaches its seq. Without that within ACK_WAIT seconds there is no live
+   mod behind this window (a reload, an older mod): say so instead of leaving "sent" up. */
+const ACK_WAIT = 8;
+const unacked = [];
+function noteWrote(ev) { unacked.push({ seq: ev.seq, kind: ev.kind, t: nowS() }); busyUntil = Math.max(busyUntil, nowS() + ACK_WAIT); kick(); }
+function noteAck(s) {
+  const ack = Number(s.petAck) || 0, n = nowS();
+  for (let i = unacked.length - 1; i >= 0; i--) {
+    if (unacked[i].seq > ack) continue;
+    unacked.splice(i, 1);
+    if (bubbleKind === 'sent') bubbleUntil = Math.min(bubbleUntil, n + 2.5); // delivered: the "sent" bubble can go soon
+  }
+}
+function checkAck() {
+  const n = nowS();
+  for (let i = unacked.length - 1; i >= 0; i--) {
+    if (n - unacked[i].t < ACK_WAIT) continue;
+    const kind = unacked[i].kind;
+    unacked.length = 0;
+    showBubble('fail', '\u2709 not delivered: run /crew pet', 14);
+    tickerPush('not delivered (' + kind + '): run /crew pet in this session', '#ff5c5c');
+    return;
+  }
+}
+function showBubble(kind, text, secs) {
+  if (!rbub) return;
+  bubbleKind = kind; bubbleUntil = nowS() + secs;
+  rbub.textContent = text; rbub.className = kind;
+  rbub.style.display = 'block';
+  busyUntil = Math.max(busyUntil, bubbleUntil); needProbe = true; kick();
+}
+function hideBubble() { if (!rbub || rbub.style.display === 'none') return; rbub.style.display = 'none'; bubbleKind = ''; bubbleUntil = 0; needProbe = true; }
+function openReply() {
+  if (!replyEl || !replyFull) return;
+  $('replyT').textContent = replyFull;
+  replyEl.style.display = 'block'; hideBubble(); closeAsk(); needProbe = true; kick();
+}
+function closeReply() { if (replyEl && replyEl.style.display === 'block') { replyEl.style.display = 'none'; needProbe = true; } }
+/** The mod put an answer to a question from the pet in the snapshot: a bubble from the main character for 12 s, a line in the ticker. */
+function noteReply(s) {
+  const r = s.lastReply;
+  if (!rbub || !r || typeof r.text !== 'string' || typeof r.at !== 'number' || r.at === replySeen) return;
+  replySeen = r.at;
+  if ((s.now || Date.now()) - r.at > 45000) return; // an old one, seen when the window opened
+  replyFull = r.text;
+  showBubble('reply', clipStr(r.text, 120), 12);
+  tickerPush('\u2709 ' + clipStr(r.text, 56), '#4de3c1');
+}
+/** The bubble sits over the main character's head (over the middle when there is none) and goes when its time is up. */
+function placeBubble() {
+  if (!rbub || rbub.style.display === 'none') return;
+  if (nowS() > bubbleUntil) { hideBubble(); return; }
+  const a = agents.get('main');
+  let x = innerWidth / 2, y = innerHeight * 0.45;
+  if (a) { _p.set(a.pos.x, a.pos.y + a.s * (a.ch.top + 2.2), a.pos.z).project(camera); x = (_p.x * 0.5 + 0.5) * innerWidth; y = (-_p.y * 0.5 + 0.5) * innerHeight; }
+  const w = rbub.offsetWidth, h = rbub.offsetHeight;
+  rbub.style.left = clamp(x - w / 2, 4, Math.max(4, innerWidth - w - 4)) + 'px';
+  rbub.style.top = clamp(y - h - 8, 24, Math.max(24, innerHeight - h - 4)) + 'px';
+}
+if (overlay && askEl) {
+  $('askX').addEventListener('click', closeAsk);
+  $('askSend').addEventListener('click', () => sendAsk('send'));
+  $('askDraft').addEventListener('click', () => sendAsk('draft'));
+  $('replyX').addEventListener('click', closeReply);
+  rbub.addEventListener('click', () => { if (bubbleKind === 'reply') openReply(); });
+  askTa.addEventListener('keydown', (e) => {
+    e.stopPropagation();
+    if (e.isComposing) return;
+    if (e.key === 'Escape') { e.preventDefault(); closeAsk(); }
+    else if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); sendAsk('send'); }
+  });
+  window.addEventListener('keydown', (e) => { if (e.key === 'Escape') { if (askIsOpen) closeAsk(); else closeReply(); } });
+}
+
 /* ---- click-through: the page tells the main process whether the pixel under the cursor is content */
 let lastMoveAt = -99;
 function noteMove() { lastMoveAt = nowS(); needProbe = true; busyUntil = Math.max(busyUntil, nowS() + 0.8); kick(); }
@@ -1924,7 +2054,7 @@ function glHit(x, y) {
 }
 function domHit(x, y) {
   const el = document.elementFromPoint(x, y);
-  if (el && el.closest && (el.closest('#plate') || el.closest('#more'))) return true;
+  if (el && el.closest && (el.closest('#plate') || el.closest('#more') || el.closest('#ask') || el.closest('#reply') || el.closest('#rbub'))) return true;
   if (el && el.closest && el.closest('#grip') && document.body.classList.contains('hot')) return true;
   if (tickEl && tickEl.offsetParent !== null) {
     for (const d of tickEl.childNodes) {
@@ -2065,6 +2195,10 @@ if (overlay) {
     pet.onEvent((ev) => {
       if (!ev) return;
       if (ev.type === 'hop') hopAll();
+      else if (ev.type === 'ask') openAsk(ev.id);
+      else if (ev.type === 'sent') showBubble('sent', '\u2709 sent', ACK_WAIT);
+      else if (ev.type === 'wrote') noteWrote(ev);
+      else if (ev.type === 'dismiss') { const n = nowS(); (Array.isArray(ev.ids) ? ev.ids : []).forEach((id, i) => { const a = agents.get(id); if (a && !a.bye) a.bye = n + i * 0.12; }); busyUntil = Math.max(busyUntil, n + 2.5 + (Array.isArray(ev.ids) ? ev.ids.length : 0) * 0.12); kick(); }
       else if (ev.type === 'reset-input') resetInput();
       else if (ev.type === 'reset') { autoFit = true; fitPending = true; busyUntil = Math.max(busyUntil, nowS() + 1); kick(); }
       else if (ev.type === 'ticker') document.body.classList.toggle('noticker', !ev.on);
@@ -2431,7 +2565,8 @@ window.__crewGrab = (w, h) => {
 if (params.has('hooks')) {
   window.__crewTest = {
     agents, files, CHARS, camera, cam, shake, THREE: T, rfx, makeCrab, updateCrab, scene,
-    anchorOf, noteCarryVelocity, petMove, pinchCrab, keepPet, setRules: (spec) => { charRules = CC.parseRules(spec); reskinAll(); },
+    anchorOf, noteCarryVelocity, petMove, openAsk, closeAsk, noteReply, showBubble, askOpen: () => askIsOpen,
+    dismissAgents: (ids) => { const n = nowS(); ids.forEach((id, i) => { const a = agents.get(id); if (a && !a.bye) a.bye = n + i * 0.12; }); busyUntil = n + 4; kick(); }, pinchCrab, keepPet, setRules: (spec) => { charRules = CC.parseRules(spec); reskinAll(); },
     ids: () => charIds.slice(), settings: () => PS, picks: () => [...agents.values()].map((a) => [a.id, a.chId, a.pick && a.pick.how, a.pick && a.pick.mode, typeKeyOf(a)]),
     // carry without the main process: the same state beginCarry makes, minus the window move
     carryStart: (id) => { carry = { crab: agents.get(id) || null, vx: 0, vy: 0, sx: 0, sy: 0 }; busyUntil = nowS() + 30; },

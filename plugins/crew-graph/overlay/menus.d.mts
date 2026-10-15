@@ -13,23 +13,29 @@ export type MenuItem = {
 export type PetSettingsLike = { types: Record<string, string>; agents: Record<string, string> }
 export type CharChoice = { id: string; name?: string }
 
+export type AgentLike = { id?: string; status?: string }
+export function agentAction(agent: AgentLike | null | undefined): '' | 'dismiss' | 'stop'
+export function finishedIds(agents: AgentLike[] | null | undefined): string[]
 export function currentValue(settings: PetSettingsLike, agentKey: string, typeKey: string): { value: string; own: boolean }
 export function characterItems(a: { chars: CharChoice[]; value: string; pick: (v: string) => void }): MenuItem[]
 export function crabItems(a: {
   ctx: { id: string; type?: string; cur?: string; chars?: CharChoice[] }
   settings: PetSettingsLike
   session: string
-  act: { set: (patch: unknown) => void; focus: () => void }
+  act: { set: (patch: unknown) => void; focus: () => void; ask?: () => void; dismiss?: () => void; stop?: () => void }
   agentKeyOf: (session: string, id: string) => string
+  canAsk?: boolean
+  action?: '' | 'dismiss' | 'stop'
 }): MenuItem[]
 export function windowItems(
-  st: { collapsed: boolean; onTop: boolean; ticker: boolean; hasId: boolean },
-  act: { show: () => void; settings: () => void; collapse: () => void; onTop: (v: boolean) => void; ticker: (v: boolean) => void; reset: () => void; close: () => void; quit: () => void },
+  st: { collapsed: boolean; onTop: boolean; ticker: boolean; hasId: boolean; canAsk?: boolean; askHere?: boolean; finished?: number },
+  act: { ask?: () => void; dismissAll?: () => void; show: () => void; settings: () => void; collapse: () => void; onTop: (v: boolean) => void; ticker: (v: boolean) => void; reset: () => void; close: () => void; quit: () => void },
 ): MenuItem[]
 export function trayItems(
-  st: { sessions: { id: string; name: string; collapsed: boolean }[]; onTop: boolean; ticker: boolean },
+  st: { sessions: { id: string; name: string; collapsed: boolean; canAsk?: boolean }[]; onTop: boolean; ticker: boolean },
   act: {
     showOne: (id: string) => void
+    askOne?: (id: string) => void
     collapseOne: (id: string) => void
     closeOne: (id: string) => void
     showAll: () => void

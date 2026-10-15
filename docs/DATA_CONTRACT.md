@@ -46,6 +46,8 @@ type Snapshot = {
   gate: { allowed: number; asked: number; denied: number; pending: number }
   architect?: { consults: number; running: boolean; lastMs?: number }
   chars?: [who: string, character: string][]   // the `characters` option, parsed (see below); absent when the option is empty
+  lastReply?: { at: number; text: string }     // the answer to the latest question asked from the desktop pet (see below); absent until there is one
+  petAck?: number                              // the seq of the newest desktop-pet request (ask, dismiss, stop) the mod accepted (see below); absent until there is one
 }
 
 type Verb = 'read' | 'edit' | 'search' | 'run' | 'web' | 'spawn' | 'plan' | 'think' | 'done' | 'failed' | 'wait'
@@ -86,6 +88,24 @@ type CrewEvent = {
   text: string                // short, already sanitized (credentials masked)
 }
 ```
+
+## Asking Claude and dismissing agents from the desktop pet
+
+`lastReply`: when a turn that came from a question asked in the pet ends, the mod sets `{ at, text }`: `at` is the time (ms) the turn ended and `text` the first 200 terminal cells of the answer on one line, credentials masked (`(the turn ended: <reason>)` when there was no answer). Only a question sent from the pet gives one: the mod notes the user's text when it submits the prompt, matches it to the main-loop turn that starts with it, and takes that turn's answer; any other turn leaves `lastReply` as it was. The pet shows it as a speech bubble from the main character for 12 s (not when it is older than 45 s on arrival, and each `at` once) and in the ticker. It is cleared on `/clear`.
+
+`agents`, `files` and `events` leave out the agents the pet dismissed (state `dismissed`: agent id to what the agent looked like when it was dismissed, so a later step, tool call or end brings it back), the file links only they made (a file nobody else touched is dropped), and the events they took part in; their children hang from the nearest agent that is shown. `/clear` forgets the set. With `autoDismiss` in `overlay/pet-settings.json` (5, 10 or 30 minutes; anything else is off) the mod also dismisses an agent that has been finished that long.
+
+The pet talks to the mod through `~/.claude/crew-graph/overlay/pet-inbox-<session id>.json` (one message, overwritten, `seq` rising; the mod polls it about once a second and acts on each `seq` once, only on a message newer than the pet's start). Besides `focus-agent` and `focus-file` (show in the Crew pane) it carries three that need a token:
+
+```ts
+type PetRequest = { seq: number; at: number; sessionId: string; token: string } & (
+  | { kind: 'ask'; mode: 'send' | 'draft'; text: string; agentId?: string }   // text: trimmed, 1-4000 characters
+  | { kind: 'dismiss'; ids: string[] }
+  | { kind: 'stop'; id: string }
+)
+```
+
+`token` is made by the mod each time it starts the pet for a session (`launch.mjs --token`, handed to a running window by the second start) and never leaves the mod and the window; the mod acts only when `sessionId` is its own session and `token` its own, and logs and ignores any other request. `send` calls `$.prompt.submit({ text })`, framed as the plugin's (never `asUser`); `draft` calls `$.prompt.fill` (`replace`, or `append` when the prompt box already holds text). With `agentId`, `text` is followed by a short context block (type, id, status, task, last 5 event texts, files touched). `petAck` is the largest `seq` among the requests the mod accepted (right token and session), set before it acts on them, so the pet can tell a request reached a live mod: a request whose `seq` is above `petAck` eight seconds after the pet wrote it is shown as not delivered. A refused request does not raise it, and it starts again from none when the mod is reloaded. The mod records in its state that the pet is on for the session (`petOn`; `/crew pet` sets it, `/crew pet off [all]` clears it) and starts the pet again on `session.start` while it is set. `stop` asks Claude, in a framed prompt, to stop that agent when the mod knows it as running; the mod cannot stop an agent itself.
 
 ## Characters
 

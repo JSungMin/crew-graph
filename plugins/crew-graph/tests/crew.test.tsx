@@ -395,6 +395,8 @@ test('/crew pet starts the overlay through launch.mjs and says how to use it', a
     'C:/Users/me/.claude/crew-graph/overlay',
     '--session',
     'sess-p1',
+    '--token',
+    expect.stringMatching(/^[0-9a-f]{32}$/) as unknown as string,
     '--orca',
   ])
   expect(main).toMatch(/overlay[/\\]main\.js$/)

@@ -3,7 +3,7 @@
 // nothing else of Electron or Node is exposed to the page.
 const { contextBridge, ipcRenderer, webFrame } = require('electron')
 
-const SEND = new Set(['pet:dragStart', 'pet:dragEnd', 'pet:resizeStart', 'pet:resizeEnd', 'pet:resizeBy', 'pet:setIgnore', 'pet:menu', 'pet:open', 'pet:reveal', 'pet:collapse', 'pet:seen', 'pet:resetSettings', 'pet:closeSettings'])
+const SEND = new Set(['pet:dragStart', 'pet:dragEnd', 'pet:resizeStart', 'pet:resizeEnd', 'pet:resizeBy', 'pet:setIgnore', 'pet:menu', 'pet:open', 'pet:reveal', 'pet:collapse', 'pet:seen', 'pet:resetSettings', 'pet:closeSettings', 'pet:ask', 'pet:askFocus'])
 const send = (channel, ...args) => {
   if (SEND.has(channel)) ipcRenderer.send(channel, ...args)
 }
@@ -36,6 +36,7 @@ const patchOf = p => {
   for (const k of ['reduceMotion', 'alwaysOnTop']) if (typeof p[k] === 'boolean') out[k] = p[k]
   if (typeof p.opacity === 'number') out.opacity = p.opacity
   if (typeof p.size === 'string') out.size = short(p.size, 4)
+  if (typeof p.autoDismiss === 'number') out.autoDismiss = p.autoDismiss
   return out
 }
 const charsOf = list =>
@@ -61,6 +62,18 @@ contextBridge.exposeInMainWorld('crewPet', {
       type: short(ctx && ctx.type, 80),
       cur: short(ctx && ctx.cur, 40),
       chars: charsOf(ctx && ctx.chars),
+    }),
+  /**
+   * The ask card. askFocus(true) while it is open: the window takes keyboard focus (it has none otherwise); askFocus(false) gives it back.
+   * ask({ mode: 'send' | 'draft', text, agentId? }) hands the question to the main process, which writes it to the mod's inbox with the
+   * window's token (the page never has the token).
+   */
+  askFocus: on => send('pet:askFocus', !!on),
+  ask: req =>
+    send('pet:ask', {
+      mode: req && req.mode === 'draft' ? 'draft' : 'send',
+      text: short(req && req.text, 4001),
+      agentId: short(req && req.agentId, 200),
     }),
   /** Fold the window down to its title bar, or open it again. */
   collapse: on => send('pet:collapse', !!on),
