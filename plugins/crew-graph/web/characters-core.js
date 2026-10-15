@@ -14,6 +14,9 @@ const EYE_VARIANTS = ['x', 'squint', 'happy', 'sleepy', 'dizzy'];
 const CHAR_ID = /^[A-Za-z0-9._-]{1,40}$/;
 const LIMITS = { boxes: 400, coord: 80, size: 80, food: 40 };
 const FOOD_ID = /^[a-z0-9_-]{1,24}$/;
+/* The foods that ship with the viewer (web/tasks.js FOODS; a test keeps the two in step). A pack without a valid `food` eats the seed. */
+const FOOD_IDS = ['fish', 'carrot', 'treat', 'seed', 'battery', 'ticket'];
+const DEFAULT_FOOD = 'seed';
 
 const hash = (s) => { let h = 2166136261; s = String(s); for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); } return h >>> 0; };
 
@@ -193,10 +196,10 @@ function box(b, warn, where) {
   return o;
 }
 const mirrorBox = (b) => Object.assign({}, b, { at: [-b.at[0], b.at[1], b.at[2]], rot: b.rot ? [b.rot[0], -b.rot[1], -b.rot[2]] : undefined });
-/* A pack's optional `food` (what its agent works on and eats): the id of a built-in food ("carrot"), or boxes like a bone
+/* A pack's optional `food` (what its agent works on and eats): the id of a built-in food ("carrot"; FOOD_IDS), or boxes like a bone
    ({ boxes: [...] } or a bare list, on the same box rules, centred on 0, about 2 voxels long, the long side along x) -> { id } | { boxes } | null. */
 function foodOf(f, warn) {
-  if (typeof f === 'string') return FOOD_ID.test(f.toLowerCase()) ? { id: f.toLowerCase() } : null;
+  if (typeof f === 'string') return FOOD_ID.test(f.toLowerCase()) && FOOD_IDS.indexOf(f.toLowerCase()) >= 0 ? { id: f.toLowerCase() } : null;
   const list = Array.isArray(f) ? f : f && typeof f === 'object' && Array.isArray(f.boxes) ? f.boxes : null;
   if (!list) return null;
   const boxes = [];
@@ -267,5 +270,124 @@ function normalizeDef(def) {
   return { def: out, warnings: warn };
 }
 
-return { RIG, EYE_VARIANTS, CHAR_ID, hash, normName, rigOf, matchRig, parseRules, ruleMatches, chooseCharacter, roleOf, autoPick, traitsOf, normalizeDef, swapLR };
+/* ---------------------------------------------------------------- pack problems
+   Everything that is wrong or missing in a user's pack, as { level: 'error' | 'warn', code, text, fix }: an error means the character is
+   not drawn as the pack meant (a crab, or nothing), a warning means it works but misses something. The mod's scan (hooks/characters.ts has a
+   twin of this table and of lintVoxel, held to it by a test) writes them next to each pack in characters-user.js; what only the page can see
+   (a GLB that failed to load, its bone names) comes from glbProblems(). `detail` is a short extra for the text (a name, a reason). */
+const list = (a) => a.slice(0, 4).map((x) => '"' + x + '"').join(', ') + (a.length > 4 ? ' and ' + (a.length - 4) + ' more' : '');
+const PROBLEM_TABLE = {
+  // errors
+  'unreadable': ['error', () => 'The file could not be read.', () => 'Check that it exists and is not locked by another program, then rescan.'],
+  'bad-json': ['error', (d) => 'Not valid JSON' + (d ? ' (' + d + ')' : '') + ', so it is skipped.', () => 'Fix the syntax (a trailing comma or a missing quote is the usual cause) and rescan.'],
+  'too-big': ['error', (d) => 'Too big (' + (d || 'over 512 KiB') + '), so it is skipped.', () => 'Use fewer boxes: a pack is meant to be small, up to ' + LIMITS.boxes + ' boxes.'],
+  'no-bones': ['error', () => 'There is no "bones" object, so nothing can be drawn.', () => 'Add "bones": { "body": { "boxes": [ { "size": [5,3,4], "at": [0,2,0], "color": "#88aaff" } ] } }.'],
+  'nothing-drawn': ['error', () => 'No box is left to draw, so the character is invisible.', () => 'Give "body" (or another bone) at least one box: { "size": [w,h,d], "at": [x,y,z], "color": "#rrggbb" }.'],
+  'food-bad': ['error', () => '"food" is not a built-in food or a list of boxes, so it eats the seed.', () => 'Use one of ' + FOOD_IDS.join(', ') + ', or boxes: "food": { "boxes": [ ... ] }.'],
+  'glb-failed': ['error', (d) => 'The model could not be loaded' + (d ? ' (' + d + ')' : '') + ', so a crab is drawn instead.', () => 'Export it again as a plain glTF binary (.glb) without Draco, Meshopt or KTX2 compression, then rescan.'],
+  'glb-too-big': ['error', () => 'The model is over 4 MiB and this page cannot read it from the folder, so a crab is drawn instead.', () => 'Make it smaller than 4 MiB (fewer polygons, smaller textures), or use the desktop pet (/crew pet), which can read it.'],
+  'glb-empty': ['error', () => 'The model has no geometry, so a crab is drawn instead.', () => 'Export the meshes together with the skeleton, not the armature alone.'],
+  // warnings
+  'food-none': ['warn', () => 'No "food", so it eats the seed.', () => 'Add "food": "seed" (or fish, carrot, treat, battery, ticket), or a list of boxes.'],
+  'no-hands': ['warn', (d) => 'No handL / handR ' + (d === 'glb' ? 'nodes' : 'bones') + ', so items are held at the arm.', (d) => (d === 'glb' ? 'Name the hand nodes handL and handR (Blender: Hand.L, Hand.R).' : 'Add "handL": { "parent": "armL", ... } and "handR": { "mirror": "handL" }.')],
+  'no-mouth': ['warn', (d) => 'No mouth ' + (d === 'glb' ? 'node' : 'bone') + ', so it eats at the head.', (d) => (d === 'glb' ? 'Name a node on the face "mouth".' : 'Add a "mouth" bone (parent "head") with a small box on the face.')],
+  'no-traits': ['warn', () => 'No "traits", so auto never picks it by role.', () => 'Add "traits": ["code", "test"]; README.txt in the characters folder lists the words that count.'],
+  'bone-unknown': ['warn', (d) => (/,| and /.test(d) ? d + ' are not rig bones, so they are skipped.' : d + ' is not a rig bone, so it is skipped.'), () => 'Rename it to a rig bone (' + RIG.join(' ') + ') or remove it.'],
+  'mirror-missing': ['warn', (d) => (/,| and /.test(d) ? d + ' mirror bones that are not defined, so they are skipped.' : d + ' mirrors a bone that is not defined, so it is skipped.'), () => 'Define the bone it mirrors, or give this one boxes of its own.'],
+  'box-color': ['warn', (d) => d + ' no #rrggbb color and ' + (/^1 /.test(d) ? 'is' : 'are') + ' drawn light grey.', () => 'Give each box "color": "#rrggbb" (or "@base" for the body color).'],
+  'box-limit': ['warn', () => 'More than ' + LIMITS.boxes + ' boxes, so the rest are ignored.', () => 'Merge boxes or make them bigger; ' + LIMITS.boxes + ' is the limit.'],
+  'glb-large': ['warn', () => 'Over 4 MiB: the mod does not embed it, so the pet reads it from the folder and a browser may refuse.', () => 'Make it smaller than 4 MiB to work everywhere.'],
+  'glb-unread': ['warn', () => 'The mod could not read the file, so the page will try the folder itself.', () => 'Check that it is not locked by another program, then rescan.'],
+  'glb-no-rig': ['warn', () => 'No node is named like a rig bone, so only the whole model moves.', () => 'Name the nodes head, armL, handL, legL1 and so on (case and _ . - are ignored).'],
+};
+const PACK_CODES = Object.keys(PROBLEM_TABLE);
+function problem(code, detail) {
+  const t = PROBLEM_TABLE[code];
+  return { level: t[0], code, text: t[1](detail), fix: t[2](detail) };
+}
+/* worst first (errors, then warnings); the order inside a level stays */
+const sortProblems = (l) => l.filter((p) => p.level === 'error').concat(l.filter((p) => p.level !== 'error'));
+const statusOf = (l) => (l.some((p) => p.level === 'error') ? 'error' : l.length ? 'warn' : 'ok');
+const colorOk = (c) => typeof c === 'string' && (/^#[0-9a-f]{6}$/i.test(c) || c === '@base');
+
+/* A voxel pack as parsed JSON -> its problems. It follows normalizeDef step by step (same loops, same limits), so what it reports is what
+   normalizeDef drops or fills in. */
+function lintVoxel(def) {
+  if (!def || typeof def !== 'object' || !def.bones || typeof def.bones !== 'object') return [problem('no-bones')];
+  const errors = [], warns = [], unknown = [], missing = [], defined = {};
+  let total = 0, over = false, drawn = 0, grey = 0;
+  const lintBox = (b) => { if (!b || typeof b !== 'object') return false; if (!colorOk(b.color)) grey++; return true; };
+  for (const name of Object.keys(def.bones)) {
+    if (RIG.indexOf(name) < 0) { unknown.push(name); continue; }
+    const src = def.bones[name];
+    if (!src || typeof src !== 'object' || typeof src.mirror === 'string') continue;
+    let n = 0;
+    for (const bx of Array.isArray(src.boxes) ? src.boxes : []) {
+      if (total >= LIMITS.boxes) { over = true; break; }
+      if (lintBox(bx)) { total++; n++; }
+    }
+    defined[name] = n; drawn += n;
+  }
+  for (const name of Object.keys(def.bones)) {
+    const src = def.bones[name];
+    if (RIG.indexOf(name) < 0 || !src || typeof src.mirror !== 'string') continue;
+    if (!Object.prototype.hasOwnProperty.call(defined, src.mirror)) { missing.push(name); continue; }
+    defined[name] = defined[src.mirror]; drawn += defined[name];
+  }
+  for (const v of EYE_VARIANTS) {
+    if (!def.eyes || typeof def.eyes !== 'object' || !Array.isArray(def.eyes[v])) continue;
+    def.eyes[v].slice(0, 12).forEach(lintBox);
+  }
+  let food = 'none';
+  if (def.food != null) {
+    food = 'bad';
+    if (typeof def.food === 'string') { if (FOOD_ID.test(def.food.toLowerCase()) && FOOD_IDS.indexOf(def.food.toLowerCase()) >= 0) food = 'ok'; }
+    else {
+      const fl = Array.isArray(def.food) ? def.food : typeof def.food === 'object' && Array.isArray(def.food.boxes) ? def.food.boxes : null;
+      if (fl) { let n = 0; fl.slice(0, LIMITS.food).forEach((bx) => { if (lintBox(bx)) n++; }); if (n) food = 'ok'; }
+    }
+  }
+  if (drawn === 0) errors.push(problem('nothing-drawn'));
+  if (food === 'bad') errors.push(problem('food-bad'));
+  if (unknown.length) warns.push(problem('bone-unknown', list(unknown)));
+  if (missing.length) warns.push(problem('mirror-missing', list(missing)));
+  if (grey) warns.push(problem('box-color', grey + (grey === 1 ? ' box has' : ' boxes have')));
+  if (over) warns.push(problem('box-limit'));
+  if (food === 'none') warns.push(problem('food-none'));
+  if (defined.handL == null && defined.handR == null) warns.push(problem('no-hands'));
+  if (defined.mouth == null) warns.push(problem('no-mouth'));
+  if (!traitsOf(def.traits).length) warns.push(problem('no-traits'));
+  return errors.concat(warns);
+}
+
+/* The badge over a character with problems: { level: 'error' | 'warn', n } or null. `hideWarn`: a list of warnings only gets none
+   (the pet setting show.packWarnings off); an error always shows. */
+function badgeOf(list, hideWarn) {
+  if (!list || !list.length) return null;
+  const level = statusOf(list);
+  return level === 'error' || !hideWarn ? { level, n: list.length } : null;
+}
+/* What a hover card shows of a list: the first `max` problems, worst first, and how many are left. */
+function cardLines(list, max) {
+  const l = sortProblems(list || []), m = max == null ? 3 : max;
+  return { lines: l.slice(0, m), more: Math.max(0, l.length - m) };
+}
+
+/* What only the page knows about a GLB: info { error?: the load error (a string), big?: it is over the mod's 4 MiB, so it was read from the
+   folder, empty?: no geometry, names?: the node names of the loaded model } -> problems. */
+function glbProblems(info) {
+  const i = info || {};
+  // the loader tries the file as JSON text when it does not start with the glTF magic: its own words would only confuse
+  const why = (e) => (/JSON|Unexpected token/i.test(e) ? 'not a glTF binary file' : e.slice(0, 80));
+  if (i.error) return [problem(i.big ? 'glb-too-big' : 'glb-failed', i.big ? '' : why(String(i.error)))];
+  if (i.empty) return [problem('glb-empty')];
+  if (!Array.isArray(i.names)) return [];
+  const got = matchRig(i.names).bones, out = [];
+  if (!Object.keys(got).length) return [problem('glb-no-rig')];
+  if (!got.handL && !got.handR) out.push(problem('no-hands', 'glb'));
+  if (!got.mouth) out.push(problem('no-mouth', 'glb'));
+  return out;
+}
+
+return { RIG, EYE_VARIANTS, CHAR_ID, FOOD_IDS, DEFAULT_FOOD, PACK_CODES, problem, lintVoxel, glbProblems, sortProblems, statusOf, badgeOf, cardLines, hash, normName, rigOf, matchRig, parseRules, ruleMatches, chooseCharacter, roleOf, autoPick, traitsOf, normalizeDef, swapLR };
 });

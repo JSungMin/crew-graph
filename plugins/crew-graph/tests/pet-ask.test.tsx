@@ -16,6 +16,10 @@ test('a request needs this session id and the token; asks must be 1-4000 charact
   for (const bad of [{ ...msg, token: 'nope' }, { ...msg, sessionId: 's2' }, { ...msg, token: undefined }, { ...msg, kind: 'focus-file' }, null, 'x']) {
     expect(checkPetMsg(bad, 's1', 'tok').ok).toBe(false)
   }
+  // the Settings window's Rescan is a request too: it needs the same session and token
+  const rescan = { kind: 'rescan', sessionId: 's1', token: 'tok' }
+  expect(checkPetMsg(rescan, 's1', 'tok').ok).toBe(true)
+  for (const bad of [{ ...rescan, token: 'nope' }, { ...rescan, sessionId: 's2' }, { ...rescan, token: undefined }]) expect(checkPetMsg(bad, 's1', 'tok').ok).toBe(false)
   // a session without an id or a token accepts nothing, even a request that "matches"
   expect(checkPetMsg({ ...msg, sessionId: '', token: '' }, '', '').ok).toBe(false)
   // the reason never carries the token
@@ -129,7 +133,7 @@ async function askHost($: Engine, on: On, opts: { settings?: string; pet?: boole
   on('tool.call', () => ({ result: 'ok', text: 'ok' }))
   on('session.end', (_$, e) => ({ sessionId: e.sessionId }))
   on('command.register', () => ({ value: { command: 'crew' } }))
-  const state = { spawned: 0, inbox: '', seq: 90_000, settings: opts.settings ?? '', box: { text: '', cursor: 0 } }
+  const state = { spawned: 0, inbox: '', seq: 90_000, settings: opts.settings ?? '', box: { text: '', cursor: 0 }, folder: [] as { name: string; kind: 'file'; size: number; mtimeMs: number; isLink: boolean }[] }
   const submits: { text: string; origin: unknown }[] = []
   const fills: { text: string; mode?: string }[] = []
   const runs: (readonly string[])[] = []
@@ -145,6 +149,7 @@ async function askHost($: Engine, on: On, opts: { settings?: string; pet?: boole
     return { value: undefined }
   })
   on('fs.exists', (_$, e) => ({ value: /electron\.exe$/.test(e.path) }))
+  on('fs.list', (_$, e) => ({ value: norm(e.path).endsWith('/characters') ? state.folder : [] })) // the user's characters folder
   on('process.run', (_$, e) => {
     runs.push(e.argv)
     return { value: ok }
@@ -392,6 +397,26 @@ test('after /crew pet off all, a new session.start does not start the pet', asyn
   await startSession($)
   await h.clock.advance(200)
   expect(launches(h)).toHaveLength(1)
+})
+
+test('the Settings window\'s Rescan rescans the characters folder like /crew characters reload; without the token nothing happens', async ($, on) => {
+  const h = await askHost($, on)
+  // the folder: one file the host reads back as text that is not JSON, so the rescan has something to report
+  h.state.folder = [{ name: 'puff.json', kind: 'file', size: 40, mtimeMs: 1, isLink: false }]
+  const manifest = () => h.written.get(`${STATE}/characters-user.js`) ?? ''
+  const before = manifest()
+  await h.send({ kind: 'rescan' }, { token: 'nope' })
+  await h.send({ kind: 'rescan' }, { sessionId: 'another-session' })
+  expect(manifest()).toBe(before)
+  await h.send({ kind: 'rescan' })
+  expect(manifest()).toContain('"file":"puff.json"')
+  expect(manifest()).toContain('"code":"bad-json"')
+  expect(manifest()).toMatch(/window\.__crewUserScanned = \d+;/)
+  expect(manifest()).not.toBe(before)
+  await h.clock.advance(600)
+  expect(h.snap().petAck).toBe(h.state.seq) // acknowledged like the other requests
+  expect(h.submits).toHaveLength(0) // it asks Claude nothing
+  expect(h.fills).toHaveLength(0)
 })
 
 test('an accepted request is acknowledged in the snapshot (petAck = its seq); a refused one is not', async ($, on) => {

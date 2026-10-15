@@ -84,7 +84,7 @@
 main=crab, Explore=cat, *=auto
 ```
 
-`auto`는 에이전트의 역할에 맞는 캐릭터를 고르고, `random`은 에이전트마다 고정된 무작위 캐릭터를 줍니다. 직접 만든 캐릭터(복셀 JSON 또는 GLB)는 `~/.claude/crew-graph/characters/`에 넣으면 됩니다. 형식은 [가이드(영문)](docs/guide.md#characters)에 있습니다.
+`auto`는 에이전트의 역할에 맞는 캐릭터를 고르고, `random`은 에이전트마다 고정된 무작위 캐릭터를 줍니다. 직접 만든 캐릭터(복셀 JSON 또는 GLB)는 `~/.claude/crew-graph/characters/`에 넣으면 됩니다. 형식은 [가이드(영문)](docs/guide.md#characters)에 있습니다. 파일에 문제가 있거나 빠진 것이 있으면 캐릭터에 빨간색 또는 주황색 `!` 배지가 붙고, **Settings…** 와 `/crew characters`에 고치는 방법과 함께 나옵니다([가이드](docs/guide.md#pack-problems)).
 
 ## ⌨️ 명령
 

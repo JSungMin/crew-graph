@@ -38,11 +38,154 @@ export const HOST_FILE_MAX = 4 * 1024 * 1024
 const PART_CHARS = 3_000_000
 const MANIFEST_MAX = 3 * 1024 * 1024
 
+// ---------------------------------------------------------------- pack problems
+// What is wrong or missing in a user's pack, as { level, code, text, fix }: an error means the character is not drawn as the pack meant (a
+// crab, nothing, a food it does not eat), a warning means it works but misses something. This is a twin of PROBLEM_TABLE / lintVoxel in
+// web/characters-core.js (the page runs that one for GLBs and as a fallback); a test feeds both the same packs and holds them together.
+
+export type PackProblem = { level: 'error' | 'warn'; code: string; text: string; fix: string }
+
+/** The rig bones (web/characters-core.js RIG) and the built-in foods (web/tasks.js FOODS); a test keeps these lists and those in step. */
+export const RIG_BONES: readonly string[] = ['root', 'body', 'head', 'earL', 'earR', 'eyeL', 'eyeR', 'mouth', 'armL', 'handL', 'armR', 'handR', 'legL1', 'legL2', 'legL3', 'legR1', 'legR2', 'legR3', 'tail']
+export const FOOD_IDS: readonly string[] = ['fish', 'carrot', 'treat', 'seed', 'battery', 'ticket']
+const EYE_VARIANTS = ['x', 'squint', 'happy', 'sleepy', 'dizzy']
+const BOX_LIMIT = 400
+const FOOD_BOX_LIMIT = 40
+
+type Row = [level: 'error' | 'warn', text: (d?: string) => string, fix: (d?: string) => string]
+const listOf = (a: string[]): string => a.slice(0, 4).map(x => `"${x}"`).join(', ') + (a.length > 4 ? ` and ${a.length - 4} more` : '')
+const PROBLEM_TABLE: Record<string, Row> = {
+  // errors
+  unreadable: ['error', () => 'The file could not be read.', () => 'Check that it exists and is not locked by another program, then rescan.'],
+  'bad-json': ['error', d => `Not valid JSON${d ? ` (${d})` : ''}, so it is skipped.`, () => 'Fix the syntax (a trailing comma or a missing quote is the usual cause) and rescan.'],
+  'too-big': ['error', d => `Too big (${d || 'over 512 KiB'}), so it is skipped.`, () => `Use fewer boxes: a pack is meant to be small, up to ${BOX_LIMIT} boxes.`],
+  'no-bones': ['error', () => 'There is no "bones" object, so nothing can be drawn.', () => 'Add "bones": { "body": { "boxes": [ { "size": [5,3,4], "at": [0,2,0], "color": "#88aaff" } ] } }.'],
+  'nothing-drawn': ['error', () => 'No box is left to draw, so the character is invisible.', () => 'Give "body" (or another bone) at least one box: { "size": [w,h,d], "at": [x,y,z], "color": "#rrggbb" }.'],
+  'food-bad': ['error', () => '"food" is not a built-in food or a list of boxes, so it eats the seed.', () => `Use one of ${FOOD_IDS.join(', ')}, or boxes: "food": { "boxes": [ ... ] }.`],
+  'glb-failed': ['error', d => `The model could not be loaded${d ? ` (${d})` : ''}, so a crab is drawn instead.`, () => 'Export it again as a plain glTF binary (.glb) without Draco, Meshopt or KTX2 compression, then rescan.'],
+  'glb-too-big': ['error', () => 'The model is over 4 MiB and this page cannot read it from the folder, so a crab is drawn instead.', () => 'Make it smaller than 4 MiB (fewer polygons, smaller textures), or use the desktop pet (/crew pet), which can read it.'],
+  'glb-empty': ['error', () => 'The model has no geometry, so a crab is drawn instead.', () => 'Export the meshes together with the skeleton, not the armature alone.'],
+  // warnings
+  'food-none': ['warn', () => 'No "food", so it eats the seed.', () => 'Add "food": "seed" (or fish, carrot, treat, battery, ticket), or a list of boxes.'],
+  'no-hands': ['warn', d => `No handL / handR ${d === 'glb' ? 'nodes' : 'bones'}, so items are held at the arm.`, d => (d === 'glb' ? 'Name the hand nodes handL and handR (Blender: Hand.L, Hand.R).' : 'Add "handL": { "parent": "armL", ... } and "handR": { "mirror": "handL" }.')],
+  'no-mouth': ['warn', d => `No mouth ${d === 'glb' ? 'node' : 'bone'}, so it eats at the head.`, d => (d === 'glb' ? 'Name a node on the face "mouth".' : 'Add a "mouth" bone (parent "head") with a small box on the face.')],
+  'no-traits': ['warn', () => 'No "traits", so auto never picks it by role.', () => 'Add "traits": ["code", "test"]; README.txt in the characters folder lists the words that count.'],
+  'bone-unknown': ['warn', d => (/,| and /.test(d ?? '') ? `${d} are not rig bones, so they are skipped.` : `${d} is not a rig bone, so it is skipped.`), () => `Rename it to a rig bone (${RIG_BONES.join(' ')}) or remove it.`],
+  'mirror-missing': ['warn', d => (/,| and /.test(d ?? '') ? `${d} mirror bones that are not defined, so they are skipped.` : `${d} mirrors a bone that is not defined, so it is skipped.`), () => 'Define the bone it mirrors, or give this one boxes of its own.'],
+  'box-color': ['warn', d => `${d} no #rrggbb color and ${/^1 /.test(d ?? '') ? 'is' : 'are'} drawn light grey.`, () => 'Give each box "color": "#rrggbb" (or "@base" for the body color).'],
+  'box-limit': ['warn', () => `More than ${BOX_LIMIT} boxes, so the rest are ignored.`, () => `Merge boxes or make them bigger; ${BOX_LIMIT} is the limit.`],
+  'glb-large': ['warn', () => 'Over 4 MiB: the mod does not embed it, so the pet reads it from the folder and a browser may refuse.', () => 'Make it smaller than 4 MiB to work everywhere.'],
+  'glb-unread': ['warn', () => 'The mod could not read the file, so the page will try the folder itself.', () => 'Check that it is not locked by another program, then rescan.'],
+  'glb-no-rig': ['warn', () => 'No node is named like a rig bone, so only the whole model moves.', () => 'Name the nodes head, armL, handL, legL1 and so on (case and _ . - are ignored).'],
+}
+export const PACK_CODES: readonly string[] = Object.keys(PROBLEM_TABLE)
+
+export function problem(code: string, detail?: string): PackProblem {
+  const row = PROBLEM_TABLE[code]
+  if (!row) throw new Error(`unknown pack problem code ${code}`)
+  return { level: row[0], code, text: row[1](detail), fix: row[2](detail) }
+}
+
+/** 'error' if any problem is an error, 'warn' if there are only warnings, else 'ok'. */
+export const statusOf = (list: readonly PackProblem[]): 'ok' | 'warn' | 'error' => (list.some(p => p.level === 'error') ? 'error' : list.length > 0 ? 'warn' : 'ok')
+
+const isObj = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null
+const colorOk = (c: unknown): boolean => typeof c === 'string' && (/^#[0-9a-f]{6}$/i.test(c) || c === '@base')
+
+/** A voxel pack as parsed JSON -> its problems; follows normalizeDef in web/characters-core.js step by step (same loops, same limits). */
+export function lintVoxel(def: unknown): PackProblem[] {
+  if (!isObj(def) || !isObj(def.bones)) return [problem('no-bones')]
+  const bones = def.bones
+  const errors: PackProblem[] = []
+  const warns: PackProblem[] = []
+  const unknown: string[] = []
+  const missing: string[] = []
+  const defined: Record<string, number> = {}
+  let total = 0
+  let over = false
+  let drawn = 0
+  let grey = 0
+  const lintBox = (b: unknown): boolean => {
+    if (!isObj(b)) return false
+    if (!colorOk(b.color)) grey++
+    return true
+  }
+  for (const name of Object.keys(bones)) {
+    if (!RIG_BONES.includes(name)) {
+      unknown.push(name)
+      continue
+    }
+    const src = bones[name]
+    if (!isObj(src) || typeof src.mirror === 'string') continue
+    let n = 0
+    for (const bx of Array.isArray(src.boxes) ? (src.boxes as unknown[]) : []) {
+      if (total >= BOX_LIMIT) {
+        over = true
+        break
+      }
+      if (lintBox(bx)) {
+        total++
+        n++
+      }
+    }
+    defined[name] = n
+    drawn += n
+  }
+  for (const name of Object.keys(bones)) {
+    const src = bones[name]
+    if (!RIG_BONES.includes(name) || !isObj(src) || typeof src.mirror !== 'string') continue
+    const from = Object.hasOwn(defined, src.mirror) ? defined[src.mirror] : undefined
+    if (from == null) {
+      missing.push(name)
+      continue
+    }
+    defined[name] = from
+    drawn += from
+  }
+  const eyes = def.eyes
+  for (const v of EYE_VARIANTS) {
+    if (!isObj(eyes) || !Array.isArray(eyes[v])) continue
+    ;(eyes[v] as unknown[]).slice(0, 12).forEach(lintBox)
+  }
+  let food: 'none' | 'ok' | 'bad' = 'none'
+  const f = def.food
+  if (f != null) {
+    food = 'bad'
+    if (typeof f === 'string') {
+      if (/^[a-z0-9_-]{1,24}$/.test(f.toLowerCase()) && FOOD_IDS.includes(f.toLowerCase())) food = 'ok'
+    } else {
+      const fl = Array.isArray(f) ? (f as unknown[]) : isObj(f) && Array.isArray(f.boxes) ? (f.boxes as unknown[]) : null
+      if (fl) {
+        let n = 0
+        fl.slice(0, FOOD_BOX_LIMIT).forEach(bx => {
+          if (lintBox(bx)) n++
+        })
+        if (n) food = 'ok'
+      }
+    }
+  }
+  if (drawn === 0) errors.push(problem('nothing-drawn'))
+  if (food === 'bad') errors.push(problem('food-bad'))
+  if (unknown.length) warns.push(problem('bone-unknown', listOf(unknown)))
+  if (missing.length) warns.push(problem('mirror-missing', listOf(missing)))
+  if (grey) warns.push(problem('box-color', `${grey} ${grey === 1 ? 'box has' : 'boxes have'}`))
+  if (over) warns.push(problem('box-limit'))
+  if (food === 'none') warns.push(problem('food-none'))
+  if (defined.handL == null && defined.handR == null) warns.push(problem('no-hands'))
+  if (defined.mouth == null) warns.push(problem('no-mouth'))
+  if (traitsOf(def.traits).length === 0) warns.push(problem('no-traits'))
+  return [...errors, ...warns]
+}
+
 export type UserChar =
   | { kind: 'voxel'; file: string; id: string; name: string; json: unknown; traits: string[] }
   | { kind: 'glb'; file: string; id: string; name: string; bytes: number; rev: string; parts: string[] | null }
 
-export type Scan = { chars: UserChar[]; notes: string[]; rev: string }
+/** One file of the folder: what it is, the id it has (or would have) and what is wrong with it. A pack that did not load has problems too. */
+export type PackInfo = { file: string; id: string; kind: 'voxel' | 'glb'; problems: PackProblem[] }
+
+/** `notes`: what is wrong with the folder itself (it cannot be read); a file's own problems are in `packs`. `at`: when it was scanned (ms). */
+export type Scan = { chars: UserChar[]; notes: string[]; rev: string; packs: PackInfo[]; at?: number }
 
 export const safeCharId = (s: string): string => {
   const id = s.replace(/\.[^.]*$/, '').replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^[-.]+|[-.]+$/g, '').slice(0, 40)
@@ -51,16 +194,17 @@ export const safeCharId = (s: string): string => {
 
 /**
  * Reads the folder. With `withData` a GLB is read and cut into base64 parts; without it only its size is looked at
- * (`/crew characters` just lists).
+ * (`/crew characters` just lists). Every .json and .glb gets an entry in `packs`, loaded or not, with its problems.
  */
 export async function scanCharacters(fs: CharFs, folder: string, withData: boolean): Promise<Scan> {
   const notes: string[] = []
   const chars: UserChar[] = []
+  const packs: PackInfo[] = []
   let entries: Awaited<ReturnType<CharFs['list']>> = []
   try {
     entries = await fs.list(folder)
   } catch {
-    return { chars, notes: [`cannot read ${folder}`], rev: '0' }
+    return { chars, notes: [`cannot read ${folder}`], rev: '0', packs }
   }
   const taken = new Set<string>(BUILTIN_CHARACTERS.map(c => c.id.toLowerCase()))
   const unique = (id: string) => {
@@ -75,52 +219,65 @@ export async function scanCharacters(fs: CharFs, folder: string, withData: boole
     const low = e.name.toLowerCase()
     const path = `${folder}/${e.name}`
     if (low.endsWith('.json')) {
+      // A pack that does not load keeps the id it would have had, so a rule that names it can be traced back to this file.
+      const failed = (id: string, ...problems: PackProblem[]) => void packs.push({ file: e.name, id, kind: 'voxel', problems })
       if (e.size > 512 * 1024) {
-        notes.push(`${e.name}: over 512 KiB, skipped`)
+        failed(safeCharId(e.name), problem('too-big', `${Math.round(e.size / 1024)} KiB, the limit is 512 KiB`))
+        continue
+      }
+      let text: string
+      try {
+        text = await fs.read(path)
+      } catch {
+        failed(safeCharId(e.name), problem('unreadable'))
         continue
       }
       let json: unknown
       try {
-        json = JSON.parse((await fs.read(path)).replace(/^﻿/, ''))
-      } catch {
-        notes.push(`${e.name}: not valid JSON, skipped`)
+        json = JSON.parse(text.replace(/^﻿/, ''))
+      } catch (err) {
+        failed(safeCharId(e.name), problem('bad-json', String((err as Error)?.message ?? '').replace(/ is not valid JSON$/, '').replace(/\s+/g, ' ').slice(0, 60)))
         continue
       }
       const j = json as { id?: unknown; name?: unknown; bones?: unknown } | null
+      // A pack names itself ("id"); a file without a usable id takes its file name. A taken id (a built-in's, another pack's) gets a suffix.
+      const wanted = j && typeof j === 'object' && typeof j.id === 'string' && /^[A-Za-z0-9._-]{1,40}$/.test(j.id) ? j.id : safeCharId(e.name)
       if (!j || typeof j !== 'object' || !j.bones || typeof j.bones !== 'object') {
-        notes.push(`${e.name}: no "bones" object, skipped`)
+        failed(wanted, problem('no-bones'))
         continue
       }
-      // A pack names itself ("id"); a file without a usable id takes its file name. A taken id (a built-in's, another pack's) gets a suffix.
-      const wanted = typeof j.id === 'string' && /^[A-Za-z0-9._-]{1,40}$/.test(j.id) ? j.id : safeCharId(e.name)
-      const id = unique(wanted)
       const size = JSON.stringify(json).length
       if (manifestBytes + size > MANIFEST_MAX) {
-        notes.push(`${e.name}: the manifest would pass ${MANIFEST_MAX >> 20} MiB, skipped`)
+        failed(wanted, problem('too-big', `the manifest would pass ${MANIFEST_MAX >> 20} MiB`))
         continue
       }
+      const id = unique(wanted)
       manifestBytes += size
       chars.push({ kind: 'voxel', file: e.name, id, name: typeof j.name === 'string' && j.name ? j.name.slice(0, 60) : id, json: { ...(json as object), id }, traits: traitsOf((j as { traits?: unknown }).traits) })
+      packs.push({ file: e.name, id, kind: 'voxel', problems: lintVoxel(json) })
     } else if (low.endsWith('.glb')) {
       const id = unique(safeCharId(e.name))
       const rev = `${e.size}-${Math.round(e.mtimeMs)}`
+      const problems: PackProblem[] = []
       let parts: string[] | null = null
       if (e.size > HOST_FILE_MAX) {
-        notes.push(`${e.name}: ${(e.size / 1048576).toFixed(1)} MiB is over the ${HOST_FILE_MAX >> 20} MiB the mod can read, so it is not embedded; the page loads the file itself where it may (the desktop pet), a browser on file:// may refuse`)
+        // not embedded: the page loads the file itself where it may (the desktop pet); a browser on file:// may refuse
+        problems.push(problem('glb-large'))
       } else if (withData) {
         try {
           const b64 = await fs.readBytes(path)
           parts = []
           for (let i = 0; i < b64.length; i += PART_CHARS) parts.push(b64.slice(i, i + PART_CHARS))
-        } catch (err) {
-          notes.push(`${e.name}: cannot read it (${String(err).slice(0, 60)})`)
+        } catch {
+          problems.push(problem('glb-unread'))
         }
       }
       chars.push({ kind: 'glb', file: e.name, id, name: id, bytes: e.size, rev, parts })
+      packs.push({ file: e.name, id, kind: 'glb', problems })
     }
   }
-  const rev = chars.map(c => `${c.id}:${c.kind === 'glb' ? c.rev : JSON.stringify(c.json).length}`).join('|')
-  return { chars, notes, rev: String(hash32(rev)) }
+  const rev = chars.map(c => `${c.id}:${c.kind === 'glb' ? c.rev : JSON.stringify(c.json).length}`).join('|') + `#${JSON.stringify(packs)}`
+  return { chars, notes, rev: String(hash32(rev)), packs }
 }
 
 const hash32 = (s: string): number => {
@@ -132,14 +289,18 @@ const hash32 = (s: string): number => {
   return h >>> 0
 }
 
-/** The manifest the page loads: `window.__crewUserCharacters` and a revision it compares to know that something changed. */
+/**
+ * The manifest the page loads: `window.__crewUserCharacters` (what can be drawn), `window.__crewUserPacks` (every file with its problems,
+ * also those that did not load), a revision it compares to know that something changed, and when the folder was scanned.
+ */
 export function manifestOf(scan: Scan): string {
   const list = scan.chars.map(c =>
     c.kind === 'voxel'
       ? { file: c.file, id: c.id, name: c.name, json: c.json }
       : { id: c.id, name: c.name, kind: 'glb', rev: c.rev, glb: { file: `characters/${c.file}`, parts: c.parts ? c.parts.length : 0, bytes: c.bytes } },
   )
-  return `window.__crewUserCharacters = ${JSON.stringify(list)};\nwindow.__crewUserRev = ${JSON.stringify(scan.rev)};\n`
+  const at = typeof scan.at === 'number' ? `window.__crewUserScanned = ${Math.round(scan.at)};\n` : ''
+  return `window.__crewUserCharacters = ${JSON.stringify(list)};\nwindow.__crewUserPacks = ${JSON.stringify(scan.packs)};\nwindow.__crewUserRev = ${JSON.stringify(scan.rev)};\n${at}`
 }
 
 /** Writes the manifest and the GLB parts into `dir` (the viewer's folder). */
@@ -206,8 +367,9 @@ Two kinds of file
    quick web plan architect design think advisor. Other words are fine, they just never match.
    "food": "carrot": what this character works on and eats when the pet shows its tasks. A built-in (fish carrot treat seed battery
    ticket), or boxes like a bone: "food": { "boxes": [ { "size":[2.4,0.5,0.5], "at":[0,0,0], "color":"#e8e0d0" }, ... ] }, centred on 0,
-   about 2.5 voxels long with the long side along x, at most 40 boxes. Without one, the crab gets a fish, the bunny a carrot, the cat a
-   treat stick, the hamster a sunflower seed, the robot a battery, and anyone else a paper ticket.
+   about 2.5 voxels long with the long side along x, at most 40 boxes. Without one (or with one that is not valid), the crab gets a fish,
+   the bunny a carrot, the cat a treat stick, the hamster a sunflower seed, the robot a battery, and your own characters a sunflower seed
+   (a .glb has no food of its own: it eats the seed).
 
    The rig (every bone is optional; an animation skips the bones a character lacks):
      root body head earL earR eyeL eyeR mouth armL handL armR handR legL1 legL2 legL3 legR1 legR2 legR3 tail
@@ -221,9 +383,18 @@ Two kinds of file
    eyeL_sleepy, eyeL_dizzy (and the same for eyeR), are shown instead of the eye for that expression.
    Draco, Meshopt and KTX2 compression are not supported. Files up to 4 MiB are embedded; a larger one is read from this
    folder by the page itself, which the desktop pet can do and a browser on file:// may refuse.
+
+Problems
+--------
+
+A file that is wrong or misses something is not silently ignored: a character whose pack has problems wears a small badge over its head
+(red "!" for an error, amber "!" for warnings only), its hover card lists the first three, and the pet's Settings window has a
+"Character packs" section with every file, its status and what to change. /crew characters prints the same list. Errors: the file cannot be read
+or parsed, a model fails to load (a crab is drawn), nothing is left to draw, an invalid "food". Warnings: no "food" (it eats the seed), no
+hand bones or no mouth (items are held at the arm, it eats at the head), no "traits", boxes or bones that were dropped.
 `
 
-/** What `/crew characters` prints: the built-in and user characters, what was wrong with a file, and the current assignment. `extra`: more lines (the pet's own settings, the agents' picks). */
+/** What `/crew characters` prints: the built-in and user characters, every pack with its problems and what to change, and the current assignment. `extra`: more lines (the pet's own settings, the agents' picks). */
 export function describeCharacters(
   scan: Scan,
   spec: string,
@@ -234,7 +405,7 @@ export function describeCharacters(
 ): string {
   const lines: string[] = []
   lines.push(`Built-in: ${BUILTIN_CHARACTERS.map(c => `${c.id} (${c.name}: ${c.traits.join(', ')})`).join('; ')}`)
-  if (scan.chars.length === 0) lines.push(`Your characters: none yet. Put *.json (voxel) or *.glb (skinned) files in ${folder}; README.txt there says how.`)
+  if (scan.chars.length === 0 && scan.packs.length === 0) lines.push(`Your characters: none yet. Put *.json (voxel) or *.glb (skinned) files in ${folder}; README.txt there says how.`)
   else {
     lines.push(`Your characters (${folder}):`)
     for (const c of scan.chars) {
@@ -243,6 +414,19 @@ export function describeCharacters(
           ? `  ${c.id}  voxel  ${c.file}${c.traits.length ? `  traits: ${c.traits.join(', ')}` : ''}`
           : `  ${c.id}  glb    ${c.file}  ${(c.bytes / 1048576).toFixed(1)} MiB  ${c.parts ? 'embedded' : 'read from the file'}`,
       )
+    }
+    // Every file with a problem, grouped by pack, worst first; a file that did not load is listed here and nowhere above.
+    const bad = scan.packs.filter(p => p.problems.length > 0).sort((a, b) => Number(statusOf(b.problems) === 'error') - Number(statusOf(a.problems) === 'error'))
+    const loaded = new Set(scan.chars.map(c => c.file))
+    const sick = scan.packs.filter(p => !loaded.has(p.file))
+    const oks = scan.packs.length - bad.length
+    lines.push(bad.length === 0 ? `Pack problems: none (${oks} pack${oks === 1 ? '' : 's'} ok).` : `Pack problems (${bad.length} of ${scan.packs.length} pack${scan.packs.length === 1 ? '' : 's'}${oks > 0 ? `, ${oks} ok` : ''}):`)
+    for (const p of bad) {
+      lines.push(`  ${p.file}  ${statusOf(p.problems) === 'error' ? 'ERROR' : 'warnings'}${sick.includes(p) ? '  (not loaded)' : ''}  as "${p.id}"`)
+      for (const pr of p.problems) {
+        lines.push(`    ${pr.level === 'error' ? 'error' : 'warn '}  ${pr.text}`)
+        lines.push(`           fix: ${pr.fix}`)
+      }
     }
   }
   for (const n of scan.notes) lines.push(`  ! ${n}`)

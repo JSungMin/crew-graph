@@ -7,7 +7,7 @@ import '../web/pet-settings-core.js'
 
 import { BUILTIN_CHARACTERS, agentsFromDataJs, autoPick, describeAgentPicks, describeCharacters, describePetSettings, roleOf, scanCharacters, traitsOf } from '../hooks/characters'
 import type { AutoState, CharFs, RoleAgent } from '../hooks/characters'
-import { AUTO_LABEL, FOLLOW_LABEL, RANDOM_LABEL, agentAction, characterItems, crabItems, currentValue, finishedIds, trayItems, windowItems } from '../overlay/menus.mjs'
+import { AUTO_LABEL, FOLLOW_LABEL, RANDOM_LABEL, packLabel, agentAction, characterItems, crabItems, currentValue, finishedIds, trayItems, windowItems } from '../overlay/menus.mjs'
 import type { MenuItem } from '../overlay/menus.mjs'
 
 type Agent = { id: string; type?: string; description?: string; verb?: string; isArchitect?: boolean; parentId?: string | null }
@@ -16,7 +16,7 @@ type Settings = {
   default: string | null
   types: Record<string, string>
   agents: Record<string, string>
-  show: { bubbles: boolean; ticker: boolean; papers: boolean; nameplate: boolean; tasks: boolean }
+  show: { bubbles: boolean; ticker: boolean; papers: boolean; nameplate: boolean; tasks: boolean; packWarnings: boolean }
   food: string
   reduceMotion: boolean
   alwaysOnTop: boolean
@@ -24,7 +24,7 @@ type Settings = {
   size: string
   autoDismiss: number
 }
-type Pick = { id: string; how: string; mode: string; why: string[] | null }
+type Pick = { id: string; how: string; mode: string; why: string[] | null; miss?: string }
 type Pet = {
   SIZES: Record<string, { width: number; height: number }>
   defaults(): Settings
@@ -71,7 +71,7 @@ test('settings are checked: bad values dropped, missing ones the default, unsafe
   expect(s.types).toEqual({ Explore: 'cat', main: 'crab' })
   expect(Object.keys(s.types)).not.toContain('__proto__')
   expect(s.agents).toEqual({ 'sess|a1': 'random' })
-  expect(s.show).toEqual({ bubbles: false, ticker: true, papers: true, nameplate: false, tasks: true })
+  expect(s.show).toEqual({ bubbles: false, ticker: true, papers: true, nameplate: false, tasks: true, packWarnings: true })
   expect(s.food).toBe('character') // an unknown food is dropped
   expect(s.reduceMotion).toBe(true)
   expect(s.alwaysOnTop).toBe(true)
@@ -90,7 +90,7 @@ test('a patch changes only what it names; null or "" removes a rule; the window 
   s = pet.merge(s, { default: 'random', types: { Explore: 'cat', '*': 'auto' }, show: { ticker: false }, opacity: 80, size: 'L' })
   expect(s.default).toBe('random')
   expect(s.types).toEqual({ Explore: 'cat', '*': 'auto' })
-  expect(s.show).toEqual({ bubbles: true, ticker: false, papers: true, nameplate: true, tasks: true })
+  expect(s.show).toEqual({ bubbles: true, ticker: false, papers: true, nameplate: true, tasks: true, packWarnings: true })
   expect([s.opacity, s.size]).toEqual([80, 'L'])
   s = pet.merge(s, { types: { Explore: null, Plan: 'mochi' }, default: null, agents: { 's|a': 'robot' } })
   expect(s.types).toEqual({ '*': 'auto', Plan: 'mochi' })
@@ -123,6 +123,22 @@ test('the task settings: show.tasks defaults on, food is character or ticket, an
   expect([s.show.tasks, s.food]).toEqual([true, 'character'])
   expect(pet.FOODS).toEqual(['character', 'ticket'])
   expect(pet.SHOW_KEYS).toContain('tasks')
+})
+
+test('show.packWarnings: defaults on, only a boolean counts, a bad value changes nothing', () => {
+  const d = pet.defaults()
+  expect(d.show.packWarnings).toBe(true)
+  expect(pet.SHOW_KEYS).toContain('packWarnings')
+  expect(pet.sanitize({ show: { packWarnings: false } }).show.packWarnings).toBe(false)
+  expect(pet.sanitize({ show: { packWarnings: 'no' } })).toEqual(d) // not a boolean: the default
+  expect(pet.sanitize({ show: { packWarnings: 0 } })).toEqual(d)
+  let s = pet.merge(d, { show: { packWarnings: false } })
+  expect(s.show.packWarnings).toBe(false)
+  s = pet.merge(s, { show: { packWarnings: 'yes', ticker: false } }) // the bad key keeps what was there, the other still counts
+  expect([s.show.packWarnings, s.show.ticker]).toEqual([false, false])
+  s = pet.merge(s, { show: { packWarnings: true } })
+  expect(s.show.packWarnings).toBe(true)
+  expect(pet.merge(s, { show: { packWarnings: null } })).toEqual(s)
 })
 
 test('the maps keep the newest entries when they are full', () => {
@@ -173,6 +189,21 @@ test('the settings file is written to a temp file and renamed; a missing or brok
 const IDS = ['crab', 'bunny', 'cat', 'mochi', 'robot', 'mine']
 const ctxOf = (session = 's1', auto?: (a: Agent) => { id: string; why: string[] } | null) => ({ ids: IDS, session, ...(auto ? { auto } : {}) })
 const cfg = (patch: unknown) => pet.merge(pet.defaults(), patch)
+
+test('a pick says which character a rule asked for that is not loaded (a pack that failed), so the page can name the pack', () => {
+  const ex: Agent = { id: 'a1', type: 'Explore' }
+  // the type rule names a pack that did not load: the next tier decides, and the miss is carried along
+  expect(pet.resolve(cfg({ types: { Explore: 'puff' }, default: 'robot' }), [], ex, ctxOf())).toMatchObject({ id: 'robot', how: 'default', miss: 'puff' })
+  // an option naming one: the crab, with the miss
+  expect(pet.resolve(pet.defaults(), core.parseRules('Explore=puff'), ex, ctxOf())).toMatchObject({ id: 'crab', how: 'option', miss: 'puff' })
+  // the first one asked for is kept
+  expect(pet.resolve(cfg({ agents: { 's1|a1': 'puff' }, types: { Explore: 'box-buddy' } }), [], ex, ctxOf())?.miss).toBe('puff')
+  // nothing asked for that is missing: no key at all (the usual picks look exactly as before)
+  const plain = pet.resolve(cfg({ types: { Explore: 'cat' } }), [], ex, ctxOf())
+  expect(plain).toEqual({ id: 'cat', how: 'type:Explore', mode: 'set', why: null })
+  expect('miss' in (pet.resolve(pet.defaults(), [], ex, ctxOf()) ?? {})).toBe(false)
+  expect('miss' in (pet.resolve(cfg({ default: 'auto' }), [], ex, ctxOf()) ?? {})).toBe(false)
+})
 
 test('precedence: the agent, then its type in the pet, then the characters option, then the pet default', () => {
   const rules = core.parseRules('Explore=bunny, main=crab')
@@ -370,7 +401,7 @@ test('the latest snapshot gives the agents and what auto would pick for them, wi
   expect(text).toContain('sonnet-coder (implement loader) -> robot (matched:')
   expect(text).toContain('Explore (map usage) -> cat (matched:')
   expect(describeAgentPicks([], BUILTIN_CHARACTERS)).toEqual([])
-  const full = describeCharacters({ chars: [], notes: [], rev: '0' }, '', 'C:/u/characters', [], false, ['an extra line'])
+  const full = describeCharacters({ chars: [], notes: [], rev: '0', packs: [] }, '', 'C:/u/characters', [], false, ['an extra line'])
   expect(full).toContain('an extra line')
 })
 
@@ -382,6 +413,20 @@ const CHARS = [
   { id: 'bunny', name: 'Mochi bunny' },
   { id: 'zip', name: 'Zippy' },
 ]
+
+test('a character whose pack has problems is offered "Pack problems…", which opens Settings at that pack; others are not', () => {
+  const sent: unknown[] = []
+  const act = { set: () => undefined, focus: () => undefined, packs: (id: string) => void sent.push(id) }
+  const plain = crabItems({ ctx: { id: 'a1', type: 'Explore', cur: 'zip', chars: CHARS }, settings: cfg({}), session: 'sess', act, agentKeyOf: pet.agentKey })
+  expect(labelsOf(plain).some(l => l.startsWith('Pack problems'))).toBe(false)
+  const items = crabItems({ ctx: { id: 'a1', type: 'Explore', cur: 'zip', chars: CHARS, pack: { id: 'zip', level: 'warn', n: 3 } }, settings: cfg({}), session: 'sess', act, agentKeyOf: pet.agentKey })
+  const labels = labelsOf(items)
+  expect(labels).toContain('Pack problems…')
+  expect(labels.indexOf('Pack problems…')).toBeGreaterThan(labels.indexOf('Show in Crew pane'))
+  items.find(i => i.label === 'Pack problems…')?.click?.({ checked: false })
+  expect(sent).toEqual(['zip'])
+  expect(packLabel()).toBe('Pack problems…')
+})
 
 test('a character is offered Character > (radio items for every character and Random), then Only this agent, near the top', () => {
   const sent: unknown[] = []

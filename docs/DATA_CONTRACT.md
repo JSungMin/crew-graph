@@ -6,7 +6,7 @@ The mod writes these files into `~/.claude/crew-graph/`:
 | --- | --- | --- |
 | `index.html`, `app.js`, `three.min.js`, `gltf-loader.classic.js`, `characters-core.js`, `characters.js`, `tasks.js` | Copied by the mod from `plugins/crew-graph/web/` on `/crew web` and `/crew pet`. | The viewer itself, with its GLB loader, the built-in characters and the tasks (the to-do items as food). |
 | `characters/` | Created by the mod (with a `README.txt`) if missing; the **user** puts `*.json` voxel packs and `*.glb` skinned models here. | The user's own characters (see below). |
-| `characters-user.js` | Rewritten by the mod when it starts the viewer and on `/crew characters reload`, from a scan of `characters/`. | The manifest of the user's characters. |
+| `characters-user.js` | Rewritten by the mod when it starts the viewer, on `/crew characters reload` and when the pet's Settings ask for a rescan, from a scan of `characters/`. | The manifest of the user's characters and the problems of every pack file. |
 | `characters-glb/<id>.<n>.js` | Written with the manifest, one or more per `.glb` up to 4 MiB. | A GLB as base64 script parts. |
 | `data.js` | Rewritten by the mod about every 500 ms while work runs, and once more after the work stops. Whichever session wrote last wins. | The live state, for `/crew web`. |
 | `sessions/<session id>.js` | Written with every `data.js`, with the same content, by the session it is named for. | That session's own live state. The desktop pet (`index.html?overlay&session=<id>`) reads this, one window per session. |
@@ -147,6 +147,19 @@ type UserCharacters = (
 )[]
 ```
 
+Next to it, `window.__crewUserPacks` lists **every** `.json` and `.glb` file of the folder, also those that did not load (a pack that fails to parse has no entry above), with what is wrong with it; `window.__crewUserScanned` is when the scan ran (ms, absent from a manifest written without a clock). `window.__crewUserRev` changes when any of this does, problems included, so a fixed (or newly broken) file is noticed.
+
+```ts
+type UserPacks = {
+  file: string                      // "puff.json"
+  id: string                        // the id it has (a pack that did not load: the id it would have had, from "id" or the file name)
+  kind: 'voxel' | 'glb'
+  problems: { level: 'error' | 'warn'; code: string; text: string; fix: string }[]   // worst first; empty: nothing to say
+}[]
+```
+
+The codes are listed in the guide ([Pack problems](guide.md#pack-problems)); the mod's `lintVoxel` / `problem()` in `hooks/characters.ts` and `lintVoxel` / `problem()` in `web/characters-core.js` give the same list for the same pack (a test holds them together). The page adds what only it can see to a loaded pack's list (a model that failed to load: `glb-failed`, `glb-too-big`, `glb-empty`; its node names: `glb-no-rig`, `no-hands`, `no-mouth`).
+
 A GLB with `parts > 0` has its base64 in `characters-glb/<id>.<0..parts-1>.js`, each calling `window.__crewGlbPart(id, n, base64)`. With `parts: 0` (over 4 MiB) the page reads `glb.file` itself (the Electron pet can; a browser on `file://` usually cannot).
 
 ```ts
@@ -164,7 +177,7 @@ type VoxelCharacter = {
 }
 ```
 
-`food` is for the tasks: up to 40 boxes on the same rules as a bone's, centred on 0, about 2.5 voxels long with the long side along x. Without it a character gets the food of its own kind (crab: fish, bunny: carrot, cat: treat stick, mochi: sunflower seed, robot: battery), anyone else a paper ticket. A bone's `at` is relative to its parent (default `body`) and the bone turns about its own origin. `mirror` copies another bone with x flipped (boxes, `at`, the turn, the parent's L/R). `gait` picks which of the four leg phases a leg uses (the run cycle). Numbers are clamped and at most 400 boxes are read. GLB bones are matched by node name to the rig, case and `_` `.` space `-` ignored.
+`food` is for the tasks: up to 40 boxes on the same rules as a bone's, centred on 0, about 2.5 voxels long with the long side along x. Without it (or with one that is not valid) a character gets the food of its own kind (crab: fish, bunny: carrot, cat: treat stick, mochi: sunflower seed, robot: battery), a user's pack the sunflower seed; a `.glb` has no food and eats the seed. A bone's `at` is relative to its parent (default `body`) and the bone turns about its own origin. `mirror` copies another bone with x flipped (boxes, `at`, the turn, the parent's L/R). `gait` picks which of the four leg phases a leg uses (the run cycle). Numbers are clamped and at most 400 boxes are read. GLB bones are matched by node name to the rig, case and `_` `.` space `-` ignored.
 
 ## How the viewer animates it
 

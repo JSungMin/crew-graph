@@ -234,12 +234,19 @@ test('/crew characters lists, /crew characters reload rescans and rewrites the m
   const listed = await $.command.run({ command: 'crew', args: 'characters' } as never)
   expect(listed.text).toContain('Built-in: crab')
   expect(listed.text).toContain('mybot  voxel  a.json')
-  expect(listed.text).toContain('broken.json: not valid JSON')
+  expect(listed.text).toContain('broken.json  ERROR  (not loaded)')
+  expect(listed.text).toContain('Not valid JSON')
+  expect(listed.text).toContain('fix: ') // every problem comes with what to change
   expect(listed.text).toContain('every agent is a crab') // no option set
   expect(written.has(`${USER_DIR}/characters-user.js`)).toBe(false) // listing writes nothing
   const reloaded = await $.command.run({ command: 'crew', args: 'characters reload' } as never)
   expect(reloaded.text).toContain('Rescanned')
   expect(written.get(`${USER_DIR}/characters-user.js`)).toContain('"id":"mybot"')
+  const manifest = written.get(`${USER_DIR}/characters-user.js`) ?? ''
+  expect(manifest).toContain('window.__crewUserPacks = [') // every file, also the one that did not load
+  expect(manifest).toContain('"file":"broken.json"')
+  expect(manifest).toContain('"code":"bad-json"')
+  expect(manifest).toMatch(/window\.__crewUserScanned = \d+;/)
 })
 
 test('a session title is its first prompt on one line, shortened, credentials masked', () => {

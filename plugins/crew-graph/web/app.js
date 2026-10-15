@@ -109,6 +109,13 @@ const M = {
 };
 const GLYPH = { z: glyphTex('z', '#bcd0ff'), q: glyphTex('?', '#ffe08a'), bang: glyphTex('!', '#ffb36b') };
 GLYPH.hurt = glyphTex('!', '#ff3355');
+// the pack-problem badge: a small round chip with a "!", red for an error, amber for warnings only
+const badgeTex = (col) => canvasTex(64, 64, (c) => {
+  c.beginPath(); c.arc(32, 32, 24, 0, 6.2832); c.fillStyle = col; c.fill();
+  c.lineWidth = 5; c.strokeStyle = 'rgba(24,12,12,.7)'; c.stroke();
+  c.font = `bold 38px ${FONT}`; c.textAlign = 'center'; c.textBaseline = 'middle'; c.fillStyle = '#fff'; c.fillText('!', 32, 35);
+});
+GLYPH.packErr = badgeTex('#e5484d'); GLYPH.packWarn = badgeTex('#f0a020');
 // pink heart and red anger mark for the pet / pinch reactions (shared by every crab)
 const HEART_TEX = canvasTex(64, 64, (c) => {
   c.translate(32, 34);
@@ -197,6 +204,31 @@ const DEFAULT_GAIT = { legL1: 0, legL2: 1, legL3: 2, legR3: 1, legR2: 2, legR1: 
 const boneOf = (o) => ({ o, px: o.position.x, py: o.position.y, pz: o.position.z, rx: o.rotation.x, ry: o.rotation.y, rz: o.rotation.z, qa: null, qb: null, kpos: 1, });
 
 const glbKeep = new Map();   // id|rev -> the record of a GLB already loaded, so a reload of the manifest does not parse it again
+/* ---- pack problems: what the mod's scan says about each file (window.__crewUserPacks) plus what only this page sees (a GLB's load) */
+const PACKS = new Map();     // id -> { file, id, kind, problems } of a user pack that loaded
+const FAILED = new Map();    // lower-case id -> the same for a file that did not load (the id it would have had)
+let packVer = 0;             // bumped whenever any of this changes: the badges look again
+function loadPacks() {
+  PACKS.clear(); FAILED.clear();
+  (window.__crewUserPacks || []).forEach((p) => {
+    if (!p || typeof p.id !== 'string' || !Array.isArray(p.problems)) return;
+    const rec = CHARS.get(p.id);
+    if (rec && rec.user) PACKS.set(p.id, p); else if (!rec) FAILED.set(p.id.toLowerCase(), p);
+  });
+  packVer++;
+}
+/* the problems of a loaded user character, worst first: the scan's (without a scan, a lint of its JSON) and the page's own (a GLB) */
+function problemsOf(id) {
+  const rec = CHARS.get(id);
+  if (!rec || !rec.user) return [];
+  const mine = rec.pageProblems || [], p = PACKS.get(id);
+  const base = (p ? p.problems : rec.raw ? CC.lintVoxel(rec.raw) : []).filter((x) => !(x.code === 'glb-large' && mine.some((y) => y.code === 'glb-too-big')));
+  return CC.sortProblems(base.concat(mine));
+}
+function glbCheck(g) {
+  const names = []; g.scene.traverse((o) => { if (o !== g.scene && o.name) names.push(o.name); });
+  return CC.glbProblems({ empty: new T.Box3().setFromObject(g.scene, true).isEmpty(), names });
+}
 function loadCharacters() {
   const was = charIds.join();
   CHARS.clear();
@@ -207,14 +239,14 @@ function loadCharacters() {
         const id = String(raw.id || '');
         if (!CC.CHAR_ID.test(id)) return;
         const old = glbKeep.get(id + '|' + (raw.rev || ''));
-        CHARS.set(id, old || { id, name: String(raw.name || id).slice(0, 60), kind: 'glb', user: true, glb: { file: String(raw.glb && raw.glb.file || raw.file || ''), parts: +(raw.glb && raw.glb.parts || raw.parts) || 0, rev: String(raw.rev || '') }, state: 'idle', gltf: null });
+        CHARS.set(id, old || { id, name: String(raw.name || id).slice(0, 60), kind: 'glb', user: true, glb: { file: String(raw.glb && raw.glb.file || raw.file || ''), parts: +(raw.glb && raw.glb.parts || raw.parts) || 0, bytes: +(raw.glb && raw.glb.bytes) || 0, rev: String(raw.rev || '') }, state: 'idle', gltf: null });
         glbKeep.set(id + '|' + (raw.rev || ''), CHARS.get(id));
         return;
       }
       const r = CC.normalizeDef(raw.json || raw);
       if (!r.def) { if (window.console) console.warn('crew-graph character ' + (raw.file || raw.id || '?') + ': ' + r.warnings.join('; ')); return; }
       if (r.warnings.length && window.console) console.warn('crew-graph character ' + r.def.id + ': ' + r.warnings.join('; '));
-      CHARS.set(r.def.id, { id: r.def.id, name: r.def.name, kind: 'voxel', user, def: r.def, state: 'ready', traits: r.def.traits || [] });
+      CHARS.set(r.def.id, { id: r.def.id, name: r.def.name, kind: 'voxel', user, def: r.def, state: 'ready', traits: r.def.traits || [], raw: user ? (raw.json || raw) : null });
     } catch (err) { if (window.console) console.warn('crew-graph character skipped', err); }
   };
   (window.__crewCharacters || []).forEach((r) => add(r, false));
@@ -224,6 +256,7 @@ function loadCharacters() {
   charIds = [...CHARS.keys()].sort((x, y) => (CHARS.get(x).user - CHARS.get(y).user) || (CHARS.get(x).user ? (x < y ? -1 : 1) : 0));
   const builtin = (window.__crewCharacters || []).map((d) => d && d.id).filter((id) => CHARS.has(id));
   charIds = [...new Set([...builtin, ...charIds])];
+  loadPacks();
   return was !== charIds.join();
 }
 
@@ -236,6 +269,31 @@ function charPickFor(d) {
 }
 const charIdFor = (d) => charPickFor(d).id;
 const typeKeyOf = (a) => (a.id === 'main' ? 'main' : a.d.type || a.id);
+/* The pack behind an agent's character, when it has problems: { id, file, problems, level, fallback }. `fallback`: the agent is not drawn as the
+   pack it was given (a model that failed to load, a pack that did not load, so a crab or another character stands in). Cached per agent. */
+function packInfo(a) {
+  const miss = a.pick && a.pick.miss;
+  if (a.pkV === packVer && a.pkCh === a.chId && a.pkWant === a.wantId && a.pkMiss === miss) return a.pk;
+  a.pkV = packVer; a.pkCh = a.chId; a.pkWant = a.wantId; a.pkMiss = miss;
+  const want = CHARS.get(a.wantId), gone = miss != null && !CHARS.has(miss) ? FAILED.get(String(miss).toLowerCase()) : null;
+  let id = a.chId, problems = null, fallback = false, file = '';
+  if (gone) { id = gone.id; file = gone.file; problems = gone.problems; fallback = true; }
+  else if (want && want.user && want.id !== a.chId && want.state !== 'loading' && want.state !== 'idle') {
+    const wp = problemsOf(want.id);
+    if (CC.statusOf(wp) === 'error') { id = want.id; problems = wp; fallback = true; }
+  }
+  if (!problems) problems = problemsOf(id);
+  if (!file) file = (PACKS.get(id) || {}).file || '';
+  return (a.pk = problems.length ? { id, file, problems: CC.sortProblems(problems), level: CC.statusOf(problems), fallback } : null);
+}
+/* the same, unless it is only warnings and the pet setting hides those (a red badge always shows) */
+const packBadge = (a) => { if (preview) return null; const pk = packInfo(a); return pk && CC.badgeOf(pk.problems, PS.show.packWarnings === false) ? pk : null; };
+/* the lines a card or tooltip shows for it (plain text): the first `max` problems, then how many more */
+function packText(pk, max, where) {
+  const cl = CC.cardLines(pk.problems, max);
+  return [pk.fallback ? 'Pack ' + (pk.file || pk.id) + ' failed, so another character stands in' : 'Pack problems' + (pk.file ? ' \u00b7 ' + pk.file : '')]
+    .concat(cl.lines.map((p) => (p.level === 'error' ? '\u25cf ' : '\u25b2 ') + p.text)).concat(cl.more ? ['+' + cl.more + ' more \u00b7 ' + where] : []);
+}
 // The agents whose character is not the one their rules ask for (a pack arrived, the rules changed) are redrawn.
 function reskinAll() {
   agents.forEach((a) => { const pk = charPickFor(a.d); a.pick = pk; if (a.wantId !== pk.id) { a.wantId = pk.id; } mountWanted(a); });
@@ -271,11 +329,14 @@ window.__crewGlbPart = (id, n, b64) => { (glbParts[id] = glbParts[id] || [])[n] 
 function ensureGlb(rec) {
   if (rec.state !== 'idle') return;
   rec.state = 'loading';
-  const fail = (why) => { rec.state = 'error'; rec.err = why; if (window.console) console.warn('crew-graph glb ' + rec.id + ': ' + why); };
+  const fail = (why) => {
+    rec.state = 'error'; rec.err = why; if (window.console) console.warn('crew-graph glb ' + rec.id + ': ' + why);
+    rec.pageProblems = CC.glbProblems({ error: why, big: rec.glb.bytes > 4 * 1048576 && !(rec.glb.parts > 0) }); packVer++; kick();
+  };
   const parse = (buf) => {
     if (!T.GLTFLoader) return fail('GLTFLoader is not loaded');
     try {
-      new T.GLTFLoader().parse(buf, '', (g) => { rec.gltf = g; rec.state = 'ready'; reskinAll(); }, (e) => fail(String(e && e.message || e)));
+      new T.GLTFLoader().parse(buf, '', (g) => { rec.gltf = g; rec.state = 'ready'; rec.pageProblems = glbCheck(g); packVer++; reskinAll(); }, (e) => fail(String(e && e.message || e)));
     } catch (e) { fail(String(e && e.message || e)); }
   };
   const fromFile = () => {
@@ -535,7 +596,7 @@ function makeCrab(d) {
     sr.scale.set(11, 1, 11); sr.position.y = 0.05; sr.renderOrder = 1; root.add(sr);
   }
   const spr = (g) => { const m = new T.SpriteMaterial({ map: g, transparent: true, depthTest: false, fog: false }); const sp = new T.Sprite(m); sp.visible = false; sp.renderOrder = 9; root.add(sp); return sp; };
-  const fx = { z: [spr(GLYPH.z), spr(GLYPH.z), spr(GLYPH.z)], q: spr(GLYPH.q), bang: spr(GLYPH.bang), orb: [spr(STAR_TEX), spr(STAR_TEX), spr(STAR_TEX)] };
+  const fx = { z: [spr(GLYPH.z), spr(GLYPH.z), spr(GLYPH.z)], q: spr(GLYPH.q), bang: spr(GLYPH.bang), pack: spr(GLYPH.packWarn), orb: [spr(STAR_TEX), spr(STAR_TEX), spr(STAR_TEX)] };
   const label = makeLabel(512, 128, isMain ? 1.05 : 0.85);
   scene.add(label.sp);
   root.scale.setScalar(0.001);
@@ -680,6 +741,13 @@ function updateCrab(a, dt, t, camPos) {
   if (F.q.visible) { F.q.position.set(2.2, tp + 1.9 + 0.3 * Math.sin(t * 3), 0.5); F.q.scale.setScalar(2.4); F.q.material.rotation = 0.2 * Math.sin(t * 2); }
   F.bang.visible = v === 'spawn';
   if (F.bang.visible) { F.bang.position.set(0, tp + 2.3 + c.by, 0.5); F.bang.scale.setScalar(2.4); }
+  const pk = packBadge(a);   // a small chip at the head's upper right: the character's pack has problems
+  F.pack.visible = !!pk;
+  if (pk) {
+    const pm = pk.level === 'error' ? GLYPH.packErr : GLYPH.packWarn;
+    if (F.pack.material.map !== pm) { F.pack.material.map = pm; F.pack.material.needsUpdate = true; }
+    F.pack.position.set(ch.bw * 0.45, tp + 1.3, 0.5); F.pack.scale.setScalar(2.3);
+  }
   for (let i = 0; i < 3; i++) { // dizzy: stars circling the head
     const sp = F.orb[i], on = R.orbit > 0.02;
     sp.visible = on;
@@ -735,7 +803,7 @@ function disposeCrab(a) {
   if (a.chip) { scene.remove(a.chip.sp); a.chip.tex.dispose(); a.chip.mat.dispose(); }
   if (a.bub) { scene.remove(a.bub.sp); a.bub.tex.dispose(); a.bub.mat.dispose(); }
   a.label.tex.dispose(); a.label.mat.dispose();
-  a.fx.z.forEach((s) => s.material.dispose()); a.fx.q.material.dispose(); a.fx.bang.material.dispose(); a.fx.orb.forEach((s) => s.material.dispose());
+  a.fx.z.forEach((s) => s.material.dispose()); a.fx.q.material.dispose(); a.fx.bang.material.dispose(); a.fx.pack.material.dispose(); a.fx.orb.forEach((s) => s.material.dispose());
 }
 
 /* ---------------------------------------------------------------- reactions (pet / pinch) */
@@ -1456,7 +1524,7 @@ function setHoverFromMouse() {
   if (o && tip) {
     let txt;
     if (th) txt = TK.tipText(th);
-    else if (o.root) txt = `${o.d.type || o.id}: ${o.d.description || ''}`;
+    else if (o.root) { txt = `${o.d.type || o.id}: ${o.d.description || ''}`; const pk = packInfo(o); if (pk) txt += '\n' + packText(pk, 3, '/crew characters').join('\n'); }
     else txt = `${o.path}\n${fileWho(o)}`;
     if (tip.textContent !== txt) tip.textContent = txt; tip.style.whiteSpace = 'pre-wrap'; tip.style.display = 'block';
     tip.style.left = Math.min(ptr.mx + 14, innerWidth - 350) + 'px'; tip.style.top = (ptr.my + 14) + 'px';
@@ -1863,6 +1931,12 @@ function fillCrabCard(a) {
   if (d.description && d.id !== 'main') card.appendChild(mk('div', 's', clipStr(d.description, 120)));
   card.appendChild(mk('div', 'p', (d.verb || '-') + (d.target ? ' ' + d.target : '')));
   card.appendChild(mk('div', 'p', `${a.chId || a.wantId} \u00b7 ${PC.explain(a.pick)}`));
+  const pk = packInfo(a); // the card lists problems whatever show.packWarnings says: that setting only hides the amber badge
+  if (pk) {
+    const tx = packText(pk, 3, 'Settings\u2026');
+    card.appendChild(mk('div', 's', clipStr(tx[0], 60)));
+    tx.slice(1).forEach((t) => { const r = mk('div', 'h', clipStr(t, 120)); if (t.charAt(0) === '\u25cf' || t.charAt(0) === '\u25b2') r.style.color = t.charAt(0) === '\u25cf' ? '#ff8f93' : '#ffc261'; card.appendChild(r); });
+  }
   card.appendChild(mk('div', 'p', `${d.steps != null ? d.steps : '-'} steps · ${d.calls != null ? d.calls : '-'} calls · ${d.startedAt ? fmtDur((d.endedAt || now) - d.startedAt) : '-'}`));
   const evs = lastSnap && Array.isArray(lastSnap.events) ? lastSnap.events.filter((e) => e.from === a.id).slice(-3) : [];
   evs.forEach((e) => card.appendChild(mk('div', 'h', '· ' + clipStr(e.text || e.tool || e.kind, 56))));
@@ -1889,7 +1963,7 @@ function updateCard(o) {
     return;
   }
   const sm = o.root || o.tk ? null : summaryFor(o), sec = Math.floor(liveNow() / 1000);
-  const key = o.tk ? TK.cardKey(o) : o.root ? ['a', o.id, o.d.status, o.d.verb, o.d.target, o.d.steps, o.d.calls, o.chId, o.pick && o.pick.how, sec].join('|') : ['f', o.path, o.d.last, sm ? 1 : 0, Math.floor(sec / 5)].join('|');
+  const key = o.tk ? TK.cardKey(o) : o.root ? ['a', o.id, o.d.status, o.d.verb, o.d.target, o.d.steps, o.d.calls, o.chId, o.pick && o.pick.how, packVer, sec].join('|') : ['f', o.path, o.d.last, sm ? 1 : 0, Math.floor(sec / 5)].join('|');
   if (key !== cardKey) {
     cardKey = key; card.textContent = '';
     if (o.tk) TK.fillCard(o, card, mk); else if (o.root) fillCrabCard(o); else fillFileCard(o, sm);
@@ -2106,7 +2180,7 @@ function overlayUp(e) {
   const o = pick(e.clientX, e.clientY);
   if (o && o.chipOf) { if (e.button === 0 && ptr.moved < 8) showMore(o.chipOf); else if (e.button === 2 && ptr.moved < 5 && pet) pet.menu({}); return; }
   if (e.button === 2) { // right click without a drag: the menu (a file gets its own entries)
-    if (ptr.moved < 5 && pet) pet.menu(o && o.root ? { kind: 'crab', id: o.id, type: typeKeyOf(o), cur: o.chId, chars: charChoices() } : o ? { kind: 'file', abs: o.d.abs || '' } : {});
+    if (ptr.moved < 5 && pet) pet.menu(o && o.root ? { kind: 'crab', id: o.id, type: typeKeyOf(o), cur: o.chId, chars: charChoices(), pack: packInfo(o) && { id: o.pk.id, level: o.pk.level, n: o.pk.problems.length } } : o ? { kind: 'file', abs: o.d.abs || '' } : {});
     return;
   }
   if (e.button === 0 && ptr.moved < 8) {
@@ -2118,7 +2192,7 @@ const charChoices = () => charIds.map((id) => ({ id, name: (CHARS.get(id) || {})
 function applyPet(s) {
   if (!s || typeof s !== 'object') return;
   const prev = PS;
-  PS = PC.sanitize(s);
+  PS = PC.sanitize(s); packVer++;
   const cl = document.body.classList;
   cl.toggle('noticker', !PS.show.ticker); cl.toggle('noplate', !PS.show.nameplate);
   if (renderer) {
@@ -2367,6 +2441,8 @@ function fillDetail() {
   txt('dTok', `${fmtK(d.ctxTokens)} / ${fmtK(d.outTokens)}`);
   txt('dTime', d.startedAt ? fmtDur((d.endedAt || now) - d.startedAt) : '-');
   txt('dMood', '\u2665 ' + a.mood.pets + ' \u00b7 \uaf2c\uc9d1\ud798 ' + a.mood.pinches);
+  const pk = packInfo(a), pd = $('dPack');
+  if (pd) { pd.style.display = pk ? 'block' : 'none'; txt('dPack', pk ? packText(pk, 99, '').join('\n') + '\n' + pk.problems.map((p) => 'fix: ' + p.fix).join('\n') : ''); }
 }
 const closeBtn = $('dClose'); if (closeBtn) closeBtn.addEventListener('click', () => { selected = null; setDetail(); });
 function setChip() {
@@ -2578,7 +2654,7 @@ if (params.has('hooks')) {
     agents, files, CHARS, camera, cam, shake, THREE: T, rfx, makeCrab, updateCrab, scene, get tasks() { return TK; }, demoT: () => nowS() - demo.t0,
     anchorOf, noteCarryVelocity, petMove, openAsk, closeAsk, noteReply, showBubble, askOpen: () => askIsOpen,
     dismissAgents: (ids) => { const n = nowS(); ids.forEach((id, i) => { const a = agents.get(id); if (a && !a.bye) a.bye = n + i * 0.12; }); busyUntil = n + 4; kick(); }, pinchCrab, keepPet, setRules: (spec) => { charRules = CC.parseRules(spec); reskinAll(); },
-    ids: () => charIds.slice(), settings: () => PS, picks: () => [...agents.values()].map((a) => [a.id, a.chId, a.pick && a.pick.how, a.pick && a.pick.mode, typeKeyOf(a)]),
+    ids: () => charIds.slice(), settings: () => PS, pack: (id) => { const a = agents.get(id); return a ? packInfo(a) : null; }, problemsOf, picks: () => [...agents.values()].map((a) => [a.id, a.chId, a.pick && a.pick.how, a.pick && a.pick.mode, typeKeyOf(a)]),
     // carry without the main process: the same state beginCarry makes, minus the window move
     carryStart: (id) => { carry = { crab: agents.get(id) || null, vx: 0, vy: 0, sx: 0, sy: 0 }; busyUntil = nowS() + 30; },
     carryEnd: () => endCarry(),
@@ -2599,7 +2675,10 @@ function initPreview() {
   document.documentElement.classList.add('preview');
   agents.forEach(disposeCrab); agents.clear();
   window.__crewPreview = {
-    list: () => charIds.map((id) => { const c = CHARS.get(id) || {}; return { id, name: c.name || id, user: !!c.user, traits: c.traits || [] }; }),
+    list: () => charIds.map((id) => { const c = CHARS.get(id) || {}; return { id, name: c.name || id, user: !!c.user, traits: c.traits || [], problems: problemsOf(id) }; }),
+    // every file of the user's folder, also those that did not load: { file, id, kind, loaded, problems } (the scan's problems plus the page's own)
+    packs: () => (window.__crewUserPacks || []).map((p) => ({ file: p.file, id: p.id, kind: p.kind, loaded: PACKS.has(p.id), problems: PACKS.has(p.id) ? problemsOf(p.id) : CC.sortProblems(p.problems || []) })),
+    scanned: () => +window.__crewUserScanned || 0,
     sig: () => charIds.join(',') + '|' + userRev,
     setClip: (el) => { pv.clip = el || null; },
     setTiles: (list) => {

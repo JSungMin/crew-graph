@@ -334,8 +334,10 @@ function applyPatch(patch) {
   return changeSettings(petCore.merge(settings, patch), size)
 }
 
-/** The one Settings window: a second request only brings it forward. */
-async function openSettings() {
+let pendingFocus = ''
+/** The one Settings window: a second request only brings it forward. `focusPack`: a character id whose pack problems it should show. */
+async function openSettings(focusPack) {
+  if (focusPack) pendingFocus = focusPack // the Settings page asks for it in its next context poll and scrolls to that pack
   if (settingsWin && !settingsWin.isDestroyed()) {
     settingsWin.show()
     settingsWin.focus()
@@ -374,10 +376,13 @@ async function openSettings() {
 const clipText = (v, n) => (typeof v === 'string' ? v.slice(0, n) : '')
 /** What the Settings window may list: every window's session and the agents its page says it shows (id, type, task). */
 function settingsContext() {
+  const focus = pendingFocus
+  pendingFocus = ''
   return {
     windows: [...wins.values()]
       .filter(alive)
-      .map(w => ({ session: w.id, name: nameOf(w), agents: w.seen || [] })),
+      .map(w => ({ session: w.id, name: nameOf(w), agents: w.seen || [], canRescan: canAsk(w) })),
+    focus,
   }
 }
 
@@ -742,6 +747,7 @@ function menuFor(w, ctx) {
           ask: () => askOpen(w, ctx.id),
           dismiss: () => dismissAgents(w, [ctx.id]),
           stop: () => stopAgent(w, ctx.id),
+          packs: id => void openSettings(id),
         },
         agentKeyOf: petCore.agentKey,
         canAsk: canAsk(w),
@@ -870,7 +876,9 @@ function wireIpc() {
       .filter(c => c && typeof c.id === 'string' && /^[A-Za-z0-9._-]{1,40}$/.test(c.id))
       .slice(0, 100)
       .map(c => ({ id: c.id, name: clipText(c.name, 60) || c.id }))
-    menuFor(w, { kind, id: clipText(ctx.id, 200), abs: ctx.abs, type: clipText(ctx.type, 80), cur: typeof ctx.cur === 'string' && /^[A-Za-z0-9._-]{1,40}$/.test(ctx.cur) ? ctx.cur : '', chars }).popup({ window: w.win })
+    const pk = ctx.pack
+    const pack = pk && typeof pk === 'object' && /^[A-Za-z0-9._-]{1,40}$/.test(String(pk.id)) && (pk.level === 'error' || pk.level === 'warn') ? { id: String(pk.id), level: pk.level, n: isNum(pk.n) ? clamp(Math.round(pk.n), 0, 99) : 0 } : null
+    menuFor(w, { kind, id: clipText(ctx.id, 200), abs: ctx.abs, type: clipText(ctx.type, 80), cur: typeof ctx.cur === 'string' && /^[A-Za-z0-9._-]{1,40}$/.test(ctx.cur) ? ctx.cur : '', chars, pack }).popup({ window: w.win })
   })
   // The agents a window shows, for the Settings window's lists.
   on('pet:seen', (w, list) => {
@@ -885,6 +893,14 @@ function wireIpc() {
   ipcMain.handle('pet:getSettings', e => (fromPage(e) ? settings : null))
   ipcMain.handle('pet:setSettings', (e, patch) => (fromPage(e) ? applyPatch(patch) : null))
   ipcMain.handle('pet:settingsContext', e => (fromSettings(e) ? settingsContext() : null))
+  // Rescan the characters folder: only the mod can read it, so a request goes into the inbox of a window whose session has a token.
+  ipcMain.handle('pet:rescanCharacters', e => {
+    if (!fromSettings(e)) return { ok: false, why: 'not the Settings window' }
+    const w = [...wins.values()].find(x => alive(x) && canAsk(x))
+    if (!w) return { ok: false, why: 'no Claude Code session is connected to the pet' }
+    writeInbox(w, { kind: 'rescan' })
+    return { ok: true }
+  })
   ipcMain.on('pet:resetSettings', e => {
     if (fromSettings(e)) changeSettings(petCore.defaults(), 'M')
   })

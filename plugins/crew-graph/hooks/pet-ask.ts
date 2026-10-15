@@ -26,13 +26,13 @@ export type PetMsg = {
 const isObject = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v)
 
 /**
- * An inbox message the mod may act on: an ask, a dismiss or a stop that carries this session's id and the token the mod gave the
+ * An inbox message the mod may act on: an ask, a dismiss, a stop or a rescan of the characters folder that carries this session's id and the token the mod gave the
  * pet when it launched it. Anything else is refused with a reason (never containing the token).
  */
 export function checkPetMsg(raw: unknown, sessionId: string, token: string): { ok: true; msg: PetMsg } | { ok: false; why: string } {
   if (!isObject(raw)) return { ok: false, why: 'not an object' }
   const msg = raw as PetMsg
-  if (msg.kind !== 'ask' && msg.kind !== 'dismiss' && msg.kind !== 'stop') return { ok: false, why: 'not a request that needs a token' }
+  if (msg.kind !== 'ask' && msg.kind !== 'dismiss' && msg.kind !== 'stop' && msg.kind !== 'rescan') return { ok: false, why: 'not a request that needs a token' }
   if (!sessionId || !token) return { ok: false, why: 'this session has no pet token' }
   if (msg.sessionId !== sessionId) return { ok: false, why: 'another session' }
   if (typeof msg.token !== 'string' || msg.token !== token) return { ok: false, why: 'wrong token' }

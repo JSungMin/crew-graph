@@ -7,7 +7,7 @@
 <style>
 :root{
   --panel:rgba(18,21,31,.97); --card:rgba(255,255,255,.045); --line:rgba(255,255,255,.1);
-  --fg:#e6e9f2; --dim:#8b93a7; --accent:#d97757; --ok:#5ee08a;
+  --fg:#e6e9f2; --dim:#8b93a7; --accent:#d97757; --ok:#5ee08a; --err:#e5484d; --amber:#f0a020;
   --font:system-ui,"Segoe UI","Malgun Gothic","Apple SD Gothic Neo","Noto Sans KR",sans-serif;
   --mono:ui-monospace,"Cascadia Mono",Consolas,"Malgun Gothic",monospace;
 }
@@ -45,6 +45,22 @@ select:focus,button:focus-visible,input:focus-visible{outline:2px solid var(--ac
 .tile b{display:block;margin-top:5px;font-size:12px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .tile .tr{margin-top:2px;color:var(--dim);font-size:10px;line-height:1.25;height:25px;overflow:hidden}
 .tile .badge{position:absolute;top:5px;right:6px;font-size:9px;color:var(--dim);background:rgba(0,0,0,.35);border-radius:999px;padding:0 6px}
+/* pack problems: a round "!" chip on a tile (red: an error, amber: warnings only), the list under the tiles and the section */
+.pbadge{position:absolute;top:5px;left:6px;z-index:30;width:17px;height:17px;border-radius:50%;border:0;padding:0;font:700 11px/17px var(--font);color:#fff;text-align:center;cursor:pointer;box-shadow:0 0 0 1.5px rgba(20,12,12,.6)}
+.pbadge.error{background:var(--err)} .pbadge.warn{background:var(--amber)}
+.tile.sel{box-shadow:0 0 0 2px rgba(255,255,255,.25)}
+.pp{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:7px 10px;margin-top:8px}
+.pp h3{margin:0 0 3px;font-size:12px;font-weight:600}
+.pp .why{margin:5px 0 0;padding-left:16px;position:relative}
+.pp .why::before{content:"";position:absolute;left:3px;top:5px;width:7px;height:7px;border-radius:50%;background:var(--amber)}
+.pp .why.error::before{background:var(--err)}
+.pp .why .fix{display:block;color:var(--dim);font-size:11px}
+.pill{display:inline-block;border-radius:999px;padding:0 8px;font-size:10px;font-weight:600;color:#fff;margin-left:6px;vertical-align:1px}
+.pill.ok{background:rgba(94,224,138,.28);color:var(--ok)} .pill.warn{background:var(--amber)} .pill.error{background:var(--err)}
+.pp.sel{border-color:var(--accent)}
+.pp small{color:var(--dim);font-weight:400;margin-left:6px}
+.bar{display:flex;align-items:center;gap:10px;margin-bottom:2px}
+.bar span{flex:1;color:var(--dim);font-size:11px}
 /* toggles */
 label.sw{display:flex;align-items:center;gap:10px;min-height:30px;cursor:pointer}
 label.sw+label.sw{border-top:1px solid rgba(255,255,255,.05)}
@@ -80,6 +96,12 @@ footer span{flex:1;color:var(--dim);font-size:11px}
     </div>
     <div class="hint">Click a character to use it as the default. "Match role" picks by what each agent does; "Random" is a stable pick per agent.</div>
     <div id="tiles"></div>
+    <div id="pdetail"></div>
+
+    <h2 id="packsH">Character packs</h2>
+    <div class="bar"><span id="packsNote">Your own characters in the characters folder.</span><button class="btn" id="rescan" title="Same as /crew characters reload">Rescan</button></div>
+    <div id="packs"></div>
+    <div class="hint">A character with a problem wears a small badge in the pet; right-click it: Pack problems&hellip;. Fix the file, then Rescan.</div>
 
     <h2>By agent type</h2>
     <div class="box" id="types"></div>
@@ -96,6 +118,7 @@ footer span{flex:1;color:var(--dim);font-size:11px}
       <label class="sw"><span>File papers<small> the files agents touched</small></span><input type="checkbox" data-show="papers"></label>
       <label class="sw"><span>Nameplate<small> the title bar with the session's name</small></span><input type="checkbox" data-show="nameplate"></label>
       <label class="sw"><span>Tasks<small> the to-do items agents work on and eat</small></span><input type="checkbox" data-show="tasks"></label>
+      <label class="sw"><span>Pack warnings<small> an amber badge on a character whose pack has only warnings (a red one always shows)</small></span><input type="checkbox" data-show="packWarnings"></label>
       <div class="row"><span class="lbl">Food<small>what a task looks like</small></span><div class="seg" id="food"><button data-food="character">Character food</button><button data-food="ticket">Paper tickets</button></div></div>
     </div>
 

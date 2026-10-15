@@ -436,6 +436,7 @@ async function syncCharacters($: EngineInterface, dir: string): Promise<Scan> {
   const folder = `${dir}/characters`
   await ensureCharacterFolder(fs, folder).catch(() => undefined)
   const scan = await scanCharacters(fs, folder, true)
+  scan.at = await $.clock.now()
   await writeCharacters(fs, dir, scan)
   return scan
 }
@@ -763,6 +764,12 @@ async function petRequest($: EngineInterface, msg: PetInbox) {
     await queueWeb($)
   }
   if (msg.kind === 'ask') return petAsk($, msg)
+  if (msg.kind === 'rescan') {
+    // The Settings window's Rescan: the same as `/crew characters reload`; a running pet picks the new manifest up within a few seconds.
+    const home = await homeDir($)
+    if (home) await syncCharacters($, `${home}/.claude/crew-graph`).catch(() => undefined)
+    return
+  }
   if (msg.kind === 'dismiss') {
     const ids = Array.isArray(msg.ids) ? msg.ids.filter((x): x is string => typeof x === 'string' && x.length <= 200).slice(0, 100) : []
     const next = dismiss(await getDismissed($), ids, await getCards($), await getActs($))
@@ -810,7 +817,7 @@ async function petAsk($: EngineInterface, msg: PetInbox) {
 }
 
 async function petInbox($: EngineInterface, msg: PetInbox) {
-  if (msg.kind === 'ask' || msg.kind === 'dismiss' || msg.kind === 'stop') return petRequest($, msg)
+  if (msg.kind === 'ask' || msg.kind === 'dismiss' || msg.kind === 'stop' || msg.kind === 'rescan') return petRequest($, msg)
   if (msg.kind === 'focus-agent' && typeof msg.id === 'string') {
     const id = msg.id
     if ((await getCards($)).some(c => c.id === id)) await update($, view, x => ({ ...normalize(DEFAULT_VIEW, x), expanded: id }))

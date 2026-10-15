@@ -31,7 +31,7 @@ const patchOf = p => {
   }
   if (p.show && typeof p.show === 'object') {
     out.show = {}
-    for (const k of ['bubbles', 'ticker', 'papers', 'nameplate', 'tasks']) if (typeof p.show[k] === 'boolean') out.show[k] = p.show[k]
+    for (const k of ['bubbles', 'ticker', 'papers', 'nameplate', 'tasks', 'packWarnings']) if (typeof p.show[k] === 'boolean') out.show[k] = p.show[k]
   }
   for (const k of ['reduceMotion', 'alwaysOnTop']) if (typeof p[k] === 'boolean') out[k] = p[k]
   if (p.food === 'character' || p.food === 'ticket') out.food = p.food
@@ -43,6 +43,9 @@ const patchOf = p => {
 const charsOf = list =>
   (Array.isArray(list) ? list : []).slice(0, 100).map(c => ({ id: short(c && c.id, 40), name: short(c && c.name, 60) }))
 
+/** The pack with problems behind a character, for its menu: { id, level, n } or null. */
+const packOf = p => (p && typeof p === 'object' && (p.level === 'error' || p.level === 'warn') ? { id: short(p.id, 40), level: p.level, n: Math.max(0, Math.min(99, Math.round(num(p.n)))) } : null)
+
 contextBridge.exposeInMainWorld('crewPet', {
   /** Start carrying the window; dx, dy: how far the pointer has moved since the press, so the window can catch up. */
   dragStart: (dx, dy) => send('pet:dragStart', num(dx), num(dy)),
@@ -52,8 +55,9 @@ contextBridge.exposeInMainWorld('crewPet', {
   resizeBy: factor => send('pet:resizeBy', num(factor)),
   setIgnore: ignore => send('pet:setIgnore', !!ignore),
   /**
-   * The native context menu; `ctx` says what was clicked: {} | { kind: 'crab', id, type, cur, chars: [{ id, name }] } | { kind: 'file', abs } | { kind: 'plate' }.
-   * For a character: its id and type, the character it has now and the characters to choose from.
+   * The native context menu; `ctx` says what was clicked: {} | { kind: 'crab', id, type, cur, chars: [{ id, name }], pack } | { kind: 'file', abs } | { kind: 'plate' }.
+   * For a character: its id and type, the character it has now, the characters to choose from, and `pack` ({ id, level, n }: the pack with
+   * problems behind it, the worst level and how many problems) when it has some.
    */
   menu: ctx =>
     send('pet:menu', {
@@ -63,6 +67,7 @@ contextBridge.exposeInMainWorld('crewPet', {
       type: short(ctx && ctx.type, 80),
       cur: short(ctx && ctx.cur, 40),
       chars: charsOf(ctx && ctx.chars),
+      pack: packOf(ctx && ctx.pack),
     }),
   /**
    * The ask card. askFocus(true) while it is open: the window takes keyboard focus (it has none otherwise); askFocus(false) gives it back.
@@ -108,5 +113,7 @@ contextBridge.exposeInMainWorld('crewPet', {
   /** Settings window only (main refuses anyone else): the sessions and agents to list, back to defaults, close. */
   settingsContext: () => ipcRenderer.invoke('pet:settingsContext'),
   resetSettings: () => send('pet:resetSettings'),
+  /** Settings window only: ask the mod of a connected session to rescan the characters folder. Resolves to { ok, why? }. */
+  rescanCharacters: () => ipcRenderer.invoke('pet:rescanCharacters'),
   closeSettings: () => send('pet:closeSettings'),
 })

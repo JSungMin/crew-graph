@@ -48,11 +48,16 @@ export function characterItems({ chars, value, pick }) {
   ]
 }
 
+/** The menu entry that opens Settings at the pack's problems. */
+export const packLabel = () => 'Pack problems…'
+
 /**
  * The top of a character's right-click menu.
- *   ctx: { id, type, cur, chars }  what the page says was clicked (cur: the character it has now)
+ *   ctx: { id, type, cur, chars, pack }  what the page says was clicked (cur: the character it has now; pack: { id, level, n }, the pack with
+ *        problems behind it, when it has some)
  *   settings, session: the pet settings and the window's session id
- *   act: { set(patch), focus(), ask(), dismiss(), stop() }   set applies a settings patch, focus shows the agent in the Crew pane;
+ *   act: { set(patch), focus(), ask(), dismiss(), stop(), packs(id) }   set applies a settings patch, focus shows the agent in the Crew pane;
+ *        packs opens Settings at that pack's problems (offered when ctx.pack is there);
  *        ask opens the question card about this agent (offered when `canAsk`), dismiss / stop act on it (offered by `action`)
  *   canAsk: this window's session can be asked (it has a session id and the pet gave it a token); action: agentAction() of the agent
  * "Only this agent" makes an entry for this one agent (starting from the character it has now); ticked, a pick changes that entry,
@@ -74,6 +79,7 @@ export function crabItems({ ctx, settings, session, act, agentKeyOf, canAsk = fa
     { type: 'separator' },
     ...(canAsk ? [{ label: 'Ask Claude…', click: () => act.ask() }] : []),
     { label: 'Show in Crew pane', click: () => act.focus() },
+    ...(ctx.pack ? [{ label: packLabel(), click: () => act.packs(ctx.pack.id) }] : []),
     ...(action === 'dismiss' && canAsk ? [{ label: 'Dismiss', click: () => act.dismiss() }] : []),
     ...(action === 'stop' && canAsk ? [{ label: 'Ask Claude to stop it', click: () => act.stop() }] : []),
     { type: 'separator' },
