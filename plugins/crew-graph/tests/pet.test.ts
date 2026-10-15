@@ -7,7 +7,7 @@ import '../web/pet-settings-core.js'
 
 import { BUILTIN_CHARACTERS, agentsFromDataJs, autoPick, describeAgentPicks, describeCharacters, describePetSettings, roleOf, scanCharacters, traitsOf } from '../hooks/characters'
 import type { AutoState, CharFs, RoleAgent } from '../hooks/characters'
-import { AUTO_LABEL, FOLLOW_LABEL, RANDOM_LABEL, characterItems, crabItems, currentValue, trayItems, windowItems } from '../overlay/menus.mjs'
+import { AUTO_LABEL, FOLLOW_LABEL, RANDOM_LABEL, agentAction, characterItems, crabItems, currentValue, finishedIds, trayItems, windowItems } from '../overlay/menus.mjs'
 import type { MenuItem } from '../overlay/menus.mjs'
 
 type Agent = { id: string; type?: string; description?: string; verb?: string; isArchitect?: boolean; parentId?: string | null }
@@ -21,6 +21,7 @@ type Settings = {
   alwaysOnTop: boolean
   opacity: number
   size: string
+  autoDismiss: number
 }
 type Pick = { id: string; how: string; mode: string; why: string[] | null }
 type Pet = {
@@ -417,4 +418,65 @@ test('both the right-click menu and the tray have "Settings…"', () => {
   expect(tray.find(i => i.label === 'Activity ticker')?.checked).toBe(false)
   expect(labelsOf(tray)).toContain('proj · fix')
   expect(labelsOf(windowItems({ collapsed: true, onTop: false, ticker: true, hasId: false }, act))).toEqual(['Show', 'Settings…', 'Expand', 'Always on top', 'Activity ticker', 'Reset position & size', '-', 'Quit'])
+})
+
+// ---------------------------------------------------------------- ask Claude, dismiss, stop
+
+test('the menu offers Dismiss for a finished agent and "Ask Claude to stop it" for a running one, from the snapshot status; main gets neither', () => {
+  for (const st of ['completed', 'failed', 'killed', 'idle', 'waiting']) expect(agentAction({ id: 'a1', status: st })).toBe('dismiss')
+  for (const st of ['running', 'pending']) expect(agentAction({ id: 'a1', status: st })).toBe('stop')
+  expect(agentAction({ id: 'main', status: 'idle' })).toBe('')
+  expect(agentAction({ id: 'a1', status: 'who knows' })).toBe('')
+  expect(agentAction(null)).toBe('')
+  const sent: string[] = []
+  const act = { set: () => undefined, focus: () => void sent.push('focus'), ask: () => void sent.push('ask'), dismiss: () => void sent.push('dismiss'), stop: () => void sent.push('stop') }
+  const base = { ctx: { id: 'a1', type: 'Explore', cur: 'crab', chars: CHARS }, settings: cfg({}), session: 'sess', act, agentKeyOf: pet.agentKey }
+  const done = crabItems({ ...base, canAsk: true, action: 'dismiss' })
+  expect(labelsOf(done)).toEqual(['Character', 'Only this agent', '-', 'Ask Claude…', 'Show in Crew pane', 'Dismiss', '-'])
+  const running = crabItems({ ...base, canAsk: true, action: 'stop' })
+  expect(labelsOf(running)).toEqual(['Character', 'Only this agent', '-', 'Ask Claude…', 'Show in Crew pane', 'Ask Claude to stop it', '-'])
+  for (const l of ['Ask Claude…', 'Dismiss']) done.find(i => i.label === l)?.click?.({ checked: false })
+  running.find(i => i.label === 'Ask Claude to stop it')?.click?.({ checked: false })
+  expect(sent).toEqual(['ask', 'dismiss', 'stop'])
+  // a window the mod gave no token to cannot ask, dismiss or stop
+  expect(labelsOf(crabItems({ ...base, canAsk: false, action: 'dismiss' }))).toEqual(['Character', 'Only this agent', '-', 'Show in Crew pane', '-'])
+  expect(finishedIds([{ id: 'main', status: 'idle' }, { id: 'a1', status: 'completed' }, { id: 'a2', status: 'running' }, { id: 'a3', status: 'failed' }])).toEqual(['a1', 'a3'])
+})
+
+test('every other menu asks Claude about nothing in particular and can dismiss all finished; the tray asks per session', () => {
+  const sent: string[] = []
+  const noop = () => undefined
+  const act = { ask: () => void sent.push('ask'), dismissAll: () => void sent.push('all'), show: noop, settings: noop, collapse: noop, onTop: noop, ticker: noop, reset: noop, close: noop, quit: noop }
+  const w = windowItems({ collapsed: false, onTop: true, ticker: true, hasId: true, canAsk: true, askHere: false, finished: 2 }, act)
+  expect(labelsOf(w).slice(0, 3)).toEqual(['Ask Claude…', 'Dismiss all finished (2)', 'Show'])
+  w.find(i => i.label === 'Ask Claude…')?.click?.({ checked: false })
+  w.find(i => i.label?.startsWith('Dismiss all'))?.click?.({ checked: false })
+  expect(sent).toEqual(['ask', 'all'])
+  // nothing to dismiss: the entry is there, greyed out
+  const none = windowItems({ collapsed: false, onTop: true, ticker: true, hasId: true, canAsk: true, finished: 0 }, act)
+  expect(none.find(i => i.label === 'Dismiss all finished')?.enabled).toBe(false)
+  // on a character's menu "Ask Claude…" is already there, about that agent
+  expect(labelsOf(windowItems({ collapsed: false, onTop: true, ticker: true, hasId: true, canAsk: true, askHere: true, finished: 0 }, act)).filter(l => l === 'Ask Claude…')).toEqual([])
+  // no token: no ask, no dismiss
+  expect(labelsOf(windowItems({ collapsed: false, onTop: true, ticker: true, hasId: true }, act))).not.toContain('Ask Claude…')
+  const asked: string[] = []
+  const tray = trayItems(
+    { sessions: [{ id: 's1', name: 'proj', collapsed: false, canAsk: true }, { id: 's2', name: 'other', collapsed: false }], onTop: true, ticker: true },
+    { showOne: noop, askOne: id => void asked.push(id), collapseOne: noop, closeOne: noop, showAll: noop, settings: noop, onTop: noop, ticker: noop, reset: noop, quit: noop },
+  )
+  const subs = tray.filter(i => i.submenu).map(i => labelsOf(i.submenu ?? []))
+  expect(subs[0]).toContain('Ask Claude…')
+  expect(subs[1]).not.toContain('Ask Claude…')
+  tray.find(i => i.label === 'proj')?.submenu?.find(i => i.label === 'Ask Claude…')?.click?.({ checked: false })
+  expect(asked).toEqual(['s1'])
+})
+
+test('autoDismiss is 0, 5, 10 or 30 minutes: anything else reads as off', () => {
+  expect(pet.defaults().autoDismiss).toBe(0)
+  expect(pet.sanitize({ autoDismiss: 10 }).autoDismiss).toBe(10)
+  for (const bad of [7, '5', -5, null, 60]) expect(pet.sanitize({ autoDismiss: bad }).autoDismiss).toBe(0)
+  expect(pet.merge({ autoDismiss: 30 }, { opacity: 80 }).autoDismiss).toBe(30)
+  expect(pet.merge({ autoDismiss: 30 }, { autoDismiss: 5 }).autoDismiss).toBe(5)
+  expect(pet.merge({ autoDismiss: 30 }, { autoDismiss: 0 }).autoDismiss).toBe(0)
+  expect(pet.merge({ autoDismiss: 30 }, { autoDismiss: 12 }).autoDismiss).toBe(30)
 })

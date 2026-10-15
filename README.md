@@ -50,7 +50,8 @@ The first `/crew pet` installs Electron (~100 MB) once, in the background, and o
 | **Stroke** it (hover back and forth) | Pet: happy eyes and hearts |
 | **Click** a file | Opens it |
 | **Hover** a character or a file | A card: status and steps, or a file summary |
-| **Right-click** | `Character ▸`, `Settings…`, open, copy path |
+| **Right-click** | `Character ▸`, `Ask Claude…`, `Settings…`, open, copy path |
+| **Right-click** a finished agent | `Dismiss` (it waves and pops away); a running one: `Ask Claude to stop it` |
 | Wheel · Ctrl+wheel · right-drag | Zoom · resize · rotate |
 
 Clicks on the transparent parts go through to your desktop.

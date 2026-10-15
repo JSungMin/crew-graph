@@ -9,7 +9,8 @@
      "types":  { "<agent type | main | architect | prefix* | *>": "<character id | random | auto>" },
      "agents": { "<session id>|<agent id>": "<character id | random | auto>" },
      "show": { "bubbles": true, "ticker": true, "papers": true, "nameplate": true },
-     "reduceMotion": false, "alwaysOnTop": true, "opacity": 100, "size": "" | "S" | "M" | "L"
+     "reduceMotion": false, "alwaysOnTop": true, "opacity": 100, "size": "" | "S" | "M" | "L",
+     "autoDismiss": 0 | 5 | 10 | 30    // minutes after which the mod dismisses a finished agent from the pet and the Crew pane; 0: never
    }
    Which character an agent gets, first match wins: its own entry in "agents", then "types" (specific keys first, "*" last), then the
    mod's `characters` option, then "default". */
@@ -23,10 +24,11 @@
 
 const SIZES = { S: { width: 260, height: 220 }, M: { width: 360, height: 300 }, L: { width: 520, height: 430 } };
 const OPACITY_MIN = 60, MAX_TYPES = 64, MAX_AGENTS = 200;
+const AUTO_DISMISS = [0, 5, 10, 30];
 const SHOW_KEYS = ['bubbles', 'ticker', 'papers', 'nameplate'];
 const UNSAFE_KEYS = ['__proto__', 'constructor', 'prototype'];
 
-const defaults = () => ({ v: 1, default: null, types: {}, agents: {}, show: { bubbles: true, ticker: true, papers: true, nameplate: true }, reduceMotion: false, alwaysOnTop: true, opacity: 100, size: '' });
+const defaults = () => ({ v: 1, default: null, types: {}, agents: {}, show: { bubbles: true, ticker: true, papers: true, nameplate: true }, reduceMotion: false, alwaysOnTop: true, opacity: 100, size: '', autoDismiss: 0 });
 /* a value a rule may have: a character id (the form only; a pack that is not loaded is not an error), `random` or `auto` */
 const okValue = (v) => typeof v === 'string' && CC.CHAR_ID.test(v);
 const okKey = (k) => typeof k === 'string' && k.length >= 1 && k.length <= 200 && !/[\u0000-\u001f]/.test(k) && UNSAFE_KEYS.indexOf(k) < 0;
@@ -51,6 +53,7 @@ function sanitize(raw) {
   if (typeof raw.alwaysOnTop === 'boolean') s.alwaysOnTop = raw.alwaysOnTop;
   if (typeof raw.opacity === 'number' && isFinite(raw.opacity)) s.opacity = Math.max(OPACITY_MIN, Math.min(100, Math.round(raw.opacity)));
   if (typeof raw.size === 'string' && SIZES[raw.size]) s.size = raw.size;
+  if (AUTO_DISMISS.indexOf(raw.autoDismiss) >= 0) s.autoDismiss = raw.autoDismiss;
   return s;
 }
 /* settings + a patch -> new settings. In "types" and "agents" a value of null or "" removes the key; "default": null clears it;
@@ -73,6 +76,7 @@ function merge(cur, patch) {
   ['reduceMotion', 'alwaysOnTop'].forEach((k) => { if (typeof patch[k] === 'boolean') next[k] = patch[k]; });
   if (typeof patch.opacity === 'number' && isFinite(patch.opacity)) next.opacity = patch.opacity;
   if (typeof patch.size === 'string' && (patch.size === '' || SIZES[patch.size])) next.size = patch.size;
+  if (AUTO_DISMISS.indexOf(patch.autoDismiss) >= 0) next.autoDismiss = patch.autoDismiss;
   return sanitize(next);
 }
 
@@ -134,5 +138,5 @@ function save(fsx, file, settings) {
   fsx.renameSync(file + '.tmp', file);
 }
 
-return { SIZES, OPACITY_MIN, SHOW_KEYS, defaults, sanitize, merge, agentKey, resolve, explain, load, save, okValue };
+return { SIZES, AUTO_DISMISS, OPACITY_MIN, SHOW_KEYS, defaults, sanitize, merge, agentKey, resolve, explain, load, save, okValue };
 });

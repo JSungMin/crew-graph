@@ -72,13 +72,27 @@ body.ended #plate{opacity:.55} body.ended #stage canvas{opacity:.45;filter:grays
 #more{position:fixed;z-index:7;display:none;min-width:150px;max-width:calc(100% - 12px);max-height:70%;overflow:hidden;background:rgba(14,16,24,.96);border:1px solid rgba(255,255,255,.18);border-radius:9px;padding:4px;font-size:11px;color:#e6e9f2;box-shadow:0 2px 10px rgba(0,0,0,.5)}
 #more .mh{color:#8b93a7;font-size:10px;padding:2px 6px} #more .mr{padding:2px 6px;border-radius:5px;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 #more .mr:hover{background:rgba(255,255,255,.12)} #more .mr.off{opacity:.5;cursor:default} #more .mr .p{color:#8b93a7;font-size:10px}
-body.collapsed #stage, body.collapsed #grip, body.collapsed #ticker, body.collapsed #hcard, body.collapsed #more{display:none !important}
+body.collapsed #stage, body.collapsed #grip, body.collapsed #ticker, body.collapsed #hcard, body.collapsed #more, body.collapsed #ask, body.collapsed #reply, body.collapsed #rbub{display:none !important}
 body.collapsed #plate{top:3px}
 #ticker{position:fixed;left:6px;bottom:6px;z-index:5;display:none;flex-direction:column;gap:2px;max-width:calc(100% - 34px);pointer-events:none}
 body.overlay #ticker{display:flex} body.overlay.noticker #ticker{display:none}
 body.overlay.noplate:not(.collapsed) #plate{display:none !important}
 #ticker div{align-self:flex-start;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;background:rgba(14,16,24,.82);border-radius:8px;padding:1px 7px;font-size:10px;color:#e6e9f2;transition:opacity 1s}
 #ticker div.old{opacity:0}
+/* ask Claude from the pet: the question card, the speech bubble ("sent" / the reply) and the reply card */
+#ask,#reply{position:fixed;z-index:9;display:none;left:50%;transform:translateX(-50%);top:30px;width:min(340px,calc(100% - 12px));max-height:calc(100% - 38px);background:rgba(14,16,24,.96);border:1px solid rgba(255,255,255,.2);border-radius:12px;padding:8px 10px 9px;color:#e6e9f2;box-shadow:0 4px 18px rgba(0,0,0,.55);flex-direction:column;gap:5px;overflow:hidden}
+#ask[style*="block"],#reply[style*="block"]{display:flex !important}
+.ah{display:flex;align-items:center;gap:8px} .ah b{flex:1;font-size:12px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ax{width:20px;height:20px;border-radius:50%;background:rgba(255,255,255,.09);text-align:center;line-height:20px;font-size:11px;cursor:pointer;flex:none} .ax:hover{background:rgba(255,92,92,.5)}
+.asub{color:#8b93a7;font-size:10px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-height:12px}
+#askTa{display:block;width:100%;min-height:54px;height:76px;max-height:100%;resize:none;background:#1b1f2c;color:#e6e9f2;border:1px solid rgba(255,255,255,.16);border-radius:8px;padding:6px 8px;font:12px/1.4 var(--font);outline:none}
+#askTa:focus{border-color:var(--accent)}
+.ar{display:flex;align-items:center;gap:6px;flex-wrap:wrap} .ahint{flex:1;min-width:60px;color:#8b93a7;font-size:10px}
+.ar button{border:1px solid rgba(255,255,255,.18);background:rgba(255,255,255,.07);color:#e6e9f2;border-radius:8px;padding:3px 10px;font:inherit;font-size:11px;cursor:pointer}
+.ar button:hover{background:rgba(255,255,255,.16)} .ar button.pri{background:var(--accent);border-color:var(--accent);color:#fff}
+#replyT{font-size:12px;line-height:1.45;color:#e6e9f2;overflow-y:auto;word-break:break-word;white-space:pre-wrap;user-select:text}
+#rbub{position:fixed;z-index:8;display:none;max-width:min(240px,calc(100% - 12px));background:rgba(14,16,24,.95);border:2px solid #4de3c1;border-radius:12px;padding:4px 10px;font-size:12px;line-height:1.35;color:#f3f5fb;word-break:break-word;box-shadow:0 2px 10px rgba(0,0,0,.5)}
+#rbub.reply{cursor:pointer} #rbub.sent{font-weight:600;white-space:nowrap}
 </style>
 </head>
 <body>
@@ -134,6 +148,9 @@ body.overlay.noplate:not(.collapsed) #plate{display:none !important}
 <div id="ticker"></div>
 <div id="plate"></div>
 <div id="more"></div>
+<div id="ask"><div class="ah"><b id="askT">Ask Claude</b><span class="ax" id="askX" title="Close (Esc)">&#x2715;</span></div><div class="asub" id="askS"></div><textarea id="askTa" maxlength="4000" spellcheck="false" placeholder="Ask something&hellip;"></textarea><div class="ar"><span class="ahint">Ctrl+Enter sends</span><button id="askDraft" title="Put the text in the prompt box without sending it">Put in prompt box</button><button id="askSend" class="pri">Send</button></div></div>
+<div id="rbub" title="Click for the whole reply"></div>
+<div id="reply"><div class="ah"><b>Claude&#x2019;s reply</b><span class="ax" id="replyX" title="Close (Esc)">&#x2715;</span></div><div id="replyT"></div></div>
 <div id="grip" title="resize"><svg viewBox="0 0 18 18"><g fill="#ffb27a"><circle cx="14" cy="14" r="1.6"/><circle cx="14" cy="9" r="1.6"/><circle cx="9" cy="14" r="1.6"/><circle cx="14" cy="4" r="1.6"/><circle cx="9" cy="9" r="1.6"/><circle cx="4" cy="14" r="1.6"/></g></svg></div>
 <div id="tip"></div>
 <div id="help">drag: rotate &middot; right-drag: pan &middot; wheel: zoom &middot; click a crab for details</div>

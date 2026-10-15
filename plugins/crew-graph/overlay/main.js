@@ -1,7 +1,7 @@
 'use strict'
 // crew pet: the crew-graph view on the desktop, in transparent, frameless, always-on-top windows.
 //
-//   electron main.js --page <index.html> --state <dir> [--session <id>] [--orca]
+//   electron main.js --page <index.html> --state <dir> [--session <id>] [--token <token>] [--orca]
 //   electron main.js ... --shot <png> [--demo [busy|lineup]] [--chars "main=crab, *=random"] [--at x,y]     one picture, then exit
 //   electron main.js ... --shot-settings <png> [--demo]               a picture of the Settings window, then exit
 //   electron main.js ... --pet-settings '<json>'                      (with --shot*) the pet settings to start from
@@ -18,7 +18,9 @@
 //                                 process reads, validates and writes it (never ~/.claude/settings.json) and tells every window.
 //   <state>/quit                  quit everything (launch.mjs --quit)
 //   <state>/close-<id>            close that session's window (launch.mjs --close <id>)
-//   <state>/pet-inbox-<id>.json   "show this in the Crew pane" requests for that session's mod
+//   <state>/pet-inbox-<id>.json   requests for that session's mod: "show this in the Crew pane", and (with the session id and the token the
+//                                 mod gave this window) ask Claude, dismiss agents, ask Claude to stop one. One message at a time, at
+//                                 least INBOX_GAP_MS apart, so the mod's poll sees each.
 const { app, BrowserWindow, Tray, Menu, nativeImage, screen, ipcMain, shell, clipboard } = require('electron')
 const fs = require('node:fs')
 const os = require('node:os')
@@ -81,8 +83,12 @@ app.setPath('userData', isScratch ? path.join(os.tmpdir(), 'crew-pet-scratch') :
 
 /** A session id becomes part of file names: ids of the usual kind only. */
 const okId = id => typeof id === 'string' && /^[A-Za-z0-9._-]{1,80}$/.test(id)
+/** The token the mod made for a window (letters and digits). Kept per window and written into every message for the mod; the page never sees it. */
+const okToken = t => typeof t === 'string' && /^[A-Za-z0-9]{16,64}$/.test(t)
+const ASK_MAX = 4000
+const INBOX_GAP_MS = 1300
 
-/** id -> window record: { id, win, ignoring, gesture, orca, snap, cursor, cursorTimer, actions } */
+/** id -> window record: { id, win, token, ignoring, asking, gesture, orca, snap, cursor, cursorTimer, actions, inboxQ, inboxAt, inboxTimer } */
 const wins = new Map()
 const byContents = new Map()
 let tray = null
@@ -413,6 +419,7 @@ function closeWindow(id) {
   stopGesture(w, true)
   clearInterval(w.cursorTimer)
   clearInterval(w.raiseTimer)
+  clearTimeout(w.inboxTimer)
   if (alive(w)) {
     byContents.delete(w.win.webContents.id)
     w.win.destroy()
@@ -434,10 +441,18 @@ function nameOf(w) {
   return name || (w.id ? w.id.slice(0, 8) : 'crew')
 }
 
-function windowItems(w) {
+const canAsk = w => !!(w && w.id && w.token)
+const agentsOf = w => {
+  const snap = snapshot(w).snap
+  return snap && Array.isArray(snap.agents) ? snap.agents : []
+}
+
+function windowItems(w, askHere) {
   return menusMod.windowItems(
-    { collapsed: !!(w && w.collapsed), onTop, ticker, hasId: !!(w && w.id) },
+    { collapsed: !!(w && w.collapsed), onTop, ticker, hasId: !!(w && w.id), canAsk: canAsk(w), askHere: !!askHere, finished: canAsk(w) ? menusMod.finishedIds(agentsOf(w)).length : 0 },
     {
+      ask: () => askOpen(w, ''),
+      dismissAll: () => dismissAgents(w, menusMod.finishedIds(agentsOf(w))),
       show: () => showWin(w),
       settings: () => void openSettings(),
       collapse: () => setCollapsed(w, !(w && w.collapsed)),
@@ -453,9 +468,10 @@ function windowItems(w) {
 function trayItems() {
   const byId = id => [...wins.values()].find(w => w.id === id)
   return menusMod.trayItems(
-    { sessions: [...wins.values()].map(w => ({ id: w.id, name: nameOf(w), collapsed: !!w.collapsed })), onTop, ticker },
+    { sessions: [...wins.values()].map(w => ({ id: w.id, name: nameOf(w), collapsed: !!w.collapsed, canAsk: canAsk(w) })), onTop, ticker },
     {
       showOne: id => showWin(byId(id)),
+      askOne: id => askOpen(byId(id), ''),
       collapseOne: id => {
         const w = byId(id)
         setCollapsed(w, !(w && w.collapsed))
@@ -475,7 +491,7 @@ function refreshTray() {
   if (tray) tray.setContextMenu(Menu.buildFromTemplate(trayItems()))
 }
 
-async function createWindow(id, orca) {
+async function createWindow(id, orca, token) {
   const bounds = boundsFor(id)
   const startCollapsed = !!(saved[id] && saved[id].collapsed)
   const shown = startCollapsed ? { x: bounds.x, y: bounds.y, width: Math.min(bounds.width, COLLAPSED_W), height: COLLAPSED_H } : bounds
@@ -492,7 +508,7 @@ async function createWindow(id, orca) {
     show: false,
     webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true, nodeIntegration: false, sandbox: true, backgroundThrottling: false },
   })
-  const w = { id, win, ignoring: true, gesture: null, collapsed: false, full: bounds, orca, snap: { mtime: -1, snap: null, files: new Map() }, cursor: '', cursorTimer: null, actions: null }
+  const w = { id, win, token: okToken(token) ? token : '', ignoring: true, asking: false, gesture: null, collapsed: false, full: bounds, orca, snap: { mtime: -1, snap: null, files: new Map() }, cursor: '', cursorTimer: null, actions: null, inboxQ: [], inboxAt: 0, inboxTimer: null }
   w.actions = actionsMod.makeActions({
     shell,
     execFile,
@@ -560,23 +576,50 @@ async function createWindow(id, orca) {
 }
 
 /** A start with a session: its window opens, or, if it is already there, it only hops. */
-async function openSession(id, orca) {
+async function openSession(id, orca, token) {
   const w = wins.get(id)
   if (alive(w)) {
     w.orca = w.orca || orca
+    // The mod made a new token (it was started again, or reloaded): the window repeats that one from now on.
+    if (okToken(token) && w.token !== token) {
+      w.token = token
+      refreshTray()
+    }
     showWin(w)
     sendTo(w, { type: 'hop' })
     return w
   }
-  return createWindow(id, orca)
+  return createWindow(id, orca, token)
 }
 
 // ---------------------------------------------------------------- the mod's inbox
 
 let inboxSeq = 0
+/**
+ * A message for the session's mod. The inbox is one file the mod looks at about once a second, so messages go out one at a time,
+ * INBOX_GAP_MS apart (a question followed at once by a dismissal would otherwise lose the question). Every message carries the
+ * session id and this window's token; the mod ignores one without both.
+ */
 function writeInbox(w, msg) {
+  w.inboxQ.push(msg)
+  pumpInbox(w)
+}
+
+function pumpInbox(w) {
+  if (w.inboxTimer || w.inboxQ.length === 0) return
+  const wait = Math.max(0, w.inboxAt + INBOX_GAP_MS - Date.now())
+  w.inboxTimer = setTimeout(() => {
+    w.inboxTimer = null
+    const msg = w.inboxQ.shift()
+    if (msg) putInbox(w, msg)
+    pumpInbox(w)
+  }, wait)
+}
+
+function putInbox(w, msg) {
   inboxSeq = Math.max(Date.now(), inboxSeq + 1)
-  const body = JSON.stringify({ seq: inboxSeq, at: Date.now(), ...msg })
+  w.inboxAt = Date.now()
+  const body = JSON.stringify({ seq: inboxSeq, at: Date.now(), ...msg, sessionId: w.id, token: w.token })
   try {
     fs.mkdirSync(stateDir, { recursive: true })
     const file = inboxFileOf(w.id)
@@ -586,6 +629,57 @@ function writeInbox(w, msg) {
   } catch (e) {
     dbg(`inbox failed ${e && e.message}`)
   }
+}
+
+// ---------------------------------------------------------------- asking Claude, dismissing agents
+
+/**
+ * The window takes keyboard focus only while its ask card is open: focusable is switched on and the window focused, and off again
+ * (with click-through put back the way the page last wanted it) when the card closes.
+ */
+function setAsking(w, on) {
+  if (!alive(w)) return
+  on = !!on
+  if (!!w.asking === on) return
+  w.asking = on
+  w.win.setFocusable(on)
+  if (on) {
+    w.win.focus()
+    // A window that was never activated may need to be shown first.
+    if (!w.win.isFocused()) {
+      w.win.show()
+      w.win.focus()
+    }
+  } else setIgnore(w, w.ignoring)
+  dbg(`asking ${on} focusable=${w.win.isFocusable()} focused=${w.win.isFocused()}`)
+}
+
+/** Open the ask card in the window (about one agent, or none): a collapsed window opens up first. */
+function askOpen(w, agentId) {
+  if (!canAsk(w)) return
+  const wasCollapsed = !!w.collapsed
+  if (wasCollapsed) setCollapsed(w, false)
+  showWin(w)
+  setTimeout(() => sendTo(w, { type: 'ask', id: String(agentId || '').slice(0, 200) }), wasCollapsed ? 150 : 0)
+}
+
+/** Dismiss finished agents: only ids the window's own snapshot lists as finished are sent; the page plays the goodbye. */
+function dismissAgents(w, ids) {
+  if (!canAsk(w)) return
+  const ok = new Set(menusMod.finishedIds(agentsOf(w)))
+  const list = [...new Set(ids)].filter(id => typeof id === 'string' && ok.has(id)).slice(0, 100)
+  if (list.length === 0) return
+  writeInbox(w, { kind: 'dismiss', ids: list })
+  sendTo(w, { type: 'dismiss', ids: list })
+}
+
+/** Ask Claude (through the mod) to stop a running agent; the mod cannot stop one itself. */
+function stopAgent(w, id) {
+  if (!canAsk(w)) return
+  const agent = agentsOf(w).find(a => a && a.id === id)
+  if (menusMod.agentAction(agent) !== 'stop') return
+  writeInbox(w, { kind: 'stop', id: String(id).slice(0, 200) })
+  sendTo(w, { type: 'sent' })
 }
 
 const summaryCache = new Map()
@@ -633,17 +727,27 @@ function menuFor(w, ctx) {
       { type: 'separator' },
     )
   } else if (ctx.kind === 'crab' && ctx.id) {
+    // Dismiss or stop is offered by what the window's own snapshot says the agent is doing, not by what the page says.
+    const agent = agentsOf(w).find(a => a && a.id === ctx.id)
     items.push(
       ...menusMod.crabItems({
         ctx,
         settings,
         session: w.id,
-        act: { set: patch => void applyPatch(patch), focus: () => writeInbox(w, { kind: 'focus-agent', id: String(ctx.id).slice(0, 200) }) },
+        act: {
+          set: patch => void applyPatch(patch),
+          focus: () => writeInbox(w, { kind: 'focus-agent', id: String(ctx.id).slice(0, 200) }),
+          ask: () => askOpen(w, ctx.id),
+          dismiss: () => dismissAgents(w, [ctx.id]),
+          stop: () => stopAgent(w, ctx.id),
+        },
         agentKeyOf: petCore.agentKey,
+        canAsk: canAsk(w),
+        action: menusMod.agentAction(agent),
       }),
     )
   }
-  return Menu.buildFromTemplate([...items, ...windowItems(w)])
+  return Menu.buildFromTemplate([...items, ...windowItems(w, ctx.kind === 'crab' && !!ctx.id && canAsk(w))])
 }
 
 // ---------------------------------------------------------------- drag and resize, polled
@@ -743,6 +847,16 @@ function wireIpc() {
   })
   on('pet:setIgnore', (w, v) => setIgnore(w, !!v))
   on('pet:collapse', (w, v) => setCollapsed(w, !!v))
+  // The ask card: the page opens it on a menu's request and says when it takes and gives up the keyboard; Send / Put in prompt box arrive here.
+  on('pet:askFocus', (w, v) => setAsking(w, !!v))
+  on('pet:ask', (w, req) => {
+    if (!canAsk(w) || !req || typeof req !== 'object') return
+    const text = typeof req.text === 'string' ? req.text.trim() : ''
+    const mode = req.mode === 'send' || req.mode === 'draft' ? req.mode : ''
+    if (!mode || !text || text.length > ASK_MAX) return dbg('ask refused')
+    const agentId = clipText(req.agentId, 200)
+    writeInbox(w, { kind: 'ask', mode, text, ...(agentId ? { agentId } : {}) })
+  })
   on('pet:menu', (w, ctx) => {
     if (!ctx || typeof ctx !== 'object') return
     const kind = ctx.kind === 'crab' || ctx.kind === 'file' || ctx.kind === 'plate' ? ctx.kind : ''
@@ -814,7 +928,7 @@ async function start() {
   legacy = validBounds(st) ? st : null
   wireIpc()
 
-  const first = await createWindow(sessionOf(mine), has('orca'))
+  const first = await createWindow(sessionOf(mine), has('orca'), arg('token'))
   const at = arg('at').split(',').map(Number)
   const size = arg('size').split(',').map(Number)
   const [sw, sh] = size.length === 2 && size.every(isNum) ? size : [DEF_W, DEF_H]
@@ -933,13 +1047,13 @@ async function runSelftest(w) {
 app.on('second-instance', (_e, _argv, _cwd, data) => {
   const id = data && okId(data.session) ? data.session : ''
   dbg(`second start for session ${id || '(none)'}`)
-  void openSession(id, !!(data && data.orca)).catch(e => dbg(`second start failed ${e && e.stack}`))
+  void openSession(id, !!(data && data.orca), data && data.token).catch(e => dbg(`second start failed ${e && e.stack}`))
 })
 app.on('window-all-closed', () => {
   if (wins.size === 0) app.quit()
 })
 
-if (!isScratch && !app.requestSingleInstanceLock({ session: sessionOf(mine), orca: has('orca') })) app.exit(0)
+if (!isScratch && !app.requestSingleInstanceLock({ session: sessionOf(mine), orca: has('orca'), token: arg('token') })) app.exit(0)
 else
   void start().catch(e => {
     dbg(`start failed ${e && e.stack}`)

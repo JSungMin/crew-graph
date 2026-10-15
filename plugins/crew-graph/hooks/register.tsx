@@ -3,7 +3,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { AgentCard, Architect, Bucket, Check, CrewEvent, FileNode, Gate, Layout, LogLine, Loop, LoopAct, Main, Roster, Turn, Usage, Verb, View, View3d, Web, PetFocus } from '../types'
+import type { AgentCard, Architect, Bucket, Check, CrewEvent, FileNode, Gate, Layout, LogLine, Loop, LoopAct, Main, Roster, Turn, Usage, Verb, View, View3d, Web, PetFocus, LastReply } from '../types'
 import {
   DEFAULT_ARCHITECT,
   DEFAULT_GATE,
@@ -65,6 +65,8 @@ import type { Config, Panel } from './deck/core'
 import { bigFrame, miniFrame, propFrame } from './clawd'
 import type { CharFs, Scan } from './characters'
 import { BUILTIN_CHARACTERS, agentsFromDataJs, describeAgentPicks, describeCharacters, describePetSettings, ensureCharacterFolder, scanCharacters, writeCharacters } from './characters'
+import { ASK_MAX, aboutOf, autoDismissed, autoDismissOf, checkPetMsg, cleanAsk, composeAsk, composeStop, dismiss, dismissedOf, hiddenIds, isFinished, replyOf, withoutHidden } from './pet-ask'
+import type { AskAbout, PetMsg } from './pet-ask'
 import { absPath, clip, dataJs, describeCall, titleOf, pushEvent, shortPath, snapshotOf, touchFile, verbOfCard, scrollbar } from './crew'
 
 const PANE = 'crew-graph'
@@ -108,6 +110,8 @@ const web = atom({ plugin: 'crew-graph', key: 'web' } as const, { isOn: false, d
 const view3d = atom({ plugin: 'crew-graph', key: 'view3d' } as const, { isOn: false, cols: 0, rows: 0, status: '' })
 const petFocus = atom({ plugin: 'crew-graph', key: 'petFocus' } as const, null)
 const sessionTitle = atom({ plugin: 'crew-graph', key: 'sessionTitle' } as const, '')
+const dismissed = atom({ plugin: 'crew-graph', key: 'dismissed' } as const, {})
+const lastReply = atom({ plugin: 'crew-graph', key: 'lastReply' } as const, null)
 const paneRows = atom({ plugin: 'crew-graph', key: 'paneRows' } as const, 0)
 
 type ServerBlock = { type: string; id?: string; name?: string; tool_use_id?: string }
@@ -163,7 +167,9 @@ async function say($: EngineInterface, who: string, text: string, kind: LogLine[
 
 async function refreshStatus($: EngineInterface, cfg: Config) {
   if (!cfg.statusLine) return $.ui.status(undefined)
-  const [u, a, g, cards] = await Promise.all([getUsage($), getArchitect($), getGate($), getCards($)])
+  const [u, a, g, allCards, dis, ac] = await Promise.all([getUsage($), getArchitect($), getGate($), getCards($), getDismissed($), getActs($)])
+  const hidden = hiddenIds(allCards, dis, ac)
+  const cards = allCards.filter(c => !hidden.has(c.id))
   const running = cards.filter(c => c.status === 'running').length
   const s = gateSummary(g)
   const parts = [
@@ -232,6 +238,11 @@ async function resetAll($: EngineInterface) {
   await update($, events, () => [])
   await update($, parents, () => ({}))
   await update($, sessionTitle, () => '')
+  // The dismissed set belongs to the agents that were just cleared; a pending question to the pet is not answered any more.
+  await update($, dismissed, () => ({}))
+  await update($, lastReply, () => null)
+  askWaits.length = 0
+  askTurns.clear()
   // The context gauge waits for the next measurement rather than showing the pre-clear fill.
   await update($, usage, x => ({ ...normalize(DEFAULT_USAGE, x), pct: null, tokens: null }))
 }
@@ -267,6 +278,9 @@ async function getEvents($: EngineInterface): Promise<CrewEvent[]> {
 async function getParents($: EngineInterface): Promise<Record<string, string>> {
   const p = await read($, parents)
   return p && typeof p === 'object' ? p : {}
+}
+async function getDismissed($: EngineInterface): Promise<Record<string, string>> {
+  return dismissedOf(await read($, dismissed))
 }
 async function getWeb($: EngineInterface): Promise<Web> {
   return normalize(WEB_OFF, await read($, web))
@@ -305,7 +319,7 @@ async function flushWeb($: EngineInterface) {
 async function writeWeb($: EngineInterface) {
   const w = await getWeb($)
   if (!w.isOn || !w.dir) return
-  const [m, u, a, g, cards, t, r, ac, fl, ev, pa, now, sid, title] = await Promise.all([
+  const [m, u, a, g, allCards, t, r, allActs, allFiles, allEvents, allParents, now, sid, title, shown, reply] = await Promise.all([
     getMain($),
     getUsage($),
     getArchitect($),
@@ -320,7 +334,14 @@ async function writeWeb($: EngineInterface) {
     $.clock.now(),
     $.session.id().catch(() => ''),
     read($, sessionTitle),
+    getDismissed($),
+    read($, lastReply),
   ])
+  // Agents the pet dismissed are not in what the pet (or the browser) is shown.
+  const { cards, acts: ac, files: fl, events: ev, parents: pa } = withoutHidden(
+    { cards: allCards, files: allFiles, acts: allActs, events: allEvents, parents: allParents },
+    hiddenIds(allCards, shown, allActs),
+  )
   const snap = snapshotOf({
     now,
     sessionId: String(sid),
@@ -339,6 +360,7 @@ async function writeWeb($: EngineInterface) {
     turn: t,
     receipt: r,
     chars: charRules,
+    lastReply: reply,
   })
   const text = dataJs(snap)
   await $.fs.write(`${w.dir}/data.js`, text).catch(() => undefined)
@@ -450,6 +472,17 @@ let petInstalling = false
 // The poll of the pet's inbox runs while its generation is the current one; /crew pet off ends it.
 let petGen = 0
 let petSeen = 0
+/**
+ * Asked of the pet and the pet asks back with it: the secret this session gave the window it launched. Held in memory only (never in state
+ * or the snapshot); the window repeats it in every request, and a request without it is ignored. A new one is made each time the pet is
+ * started, which also hands it to a window that is already running.
+ */
+let petToken = ''
+/** Questions sent from the pet that have not started their turn yet (the session may be busy): the head of the user's text. */
+const askWaits: { key: string; at: number }[] = []
+/** The ids of the main-loop turns that came from a pet question; the answer of such a turn is the pet's `lastReply`. */
+const askTurns = new Set<string>()
+const ASK_WAIT_MS = 30 * 60_000
 
 async function petPaths($: EngineInterface): Promise<PetPaths | null> {
   const home = await homeDir($)
@@ -513,7 +546,8 @@ async function petSession($: EngineInterface): Promise<string> {
 async function petLaunch($: EngineInterface, p: PetPaths, bin: string): Promise<string> {
   const isOrca = (await $.env.get('TERM_PROGRAM')) === 'Orca'
   const sid = await petSession($)
-  const argv = ['node', p.launch, '--electron', bin, '--main', p.main, '--page', p.page, '--state', p.state, ...(sid ? ['--session', sid] : []), ...(isOrca ? ['--orca'] : [])]
+  petToken = crypto.randomUUID().replace(/-/g, '')
+  const argv = ['node', p.launch, '--electron', bin, '--main', p.main, '--page', p.page, '--state', p.state, ...(sid ? ['--session', sid, '--token', petToken] : []), ...(isOrca ? ['--orca'] : [])]
   const res = await runOrFail($, argv, undefined, 20_000)
   if (res.exitCode !== 0) return `crew pet: could not start it: ${tailOf(res.stdout || res.stderr)}`
   petWatch($, p, sid)
@@ -605,6 +639,7 @@ async function petStart($: EngineInterface): Promise<string> {
 /** /crew pet off closes this session's window, /crew pet off all quits the pet with every window. */
 async function petStop($: EngineInterface, all: boolean): Promise<string> {
   petGen += 1
+  petToken = ''
   const p = await petPaths($)
   if (!p) return 'crew pet: no home directory.'
   const sid = await petSession($)
@@ -616,13 +651,9 @@ async function petStop($: EngineInterface, all: boolean): Promise<string> {
 
 // The pet's right-click menu can ask the Crew pane to show a file or an agent: it writes <state>/pet-inbox.json
 // and the mod looks at it about once a second while a pet it started is running.
-type PetInbox = {
-  seq?: number
-  at?: number
-  kind?: string
+type PetInbox = PetMsg & {
   abs?: string
   path?: string
-  id?: string
   summary?: { title?: string; lead?: string; heads?: string[]; decls?: string[]; error?: string }
 }
 
@@ -632,12 +663,16 @@ function petWatch($: EngineInterface, p: PetPaths, sid: string) {
   const inbox = `${p.state}/${sid ? `pet-inbox-${sid}.json` : 'pet-inbox.json'}`
   void $.clock
     .now()
-    .then(startedAt => petPoll($, gen, inbox, startedAt))
+    .then(startedAt => petPoll($, gen, inbox, startedAt, 0))
     .catch(() => undefined)
 }
 
-async function petPoll($: EngineInterface, gen: number, inbox: string, startedAt: number) {
+/** Every this many polls the pet's settings are read again (auto-dismiss). */
+const SETTINGS_EVERY = 10
+
+async function petPoll($: EngineInterface, gen: number, inbox: string, startedAt: number, n: number) {
   if (gen !== petGen) return
+  if (n % SETTINGS_EVERY === 0) await petAutoDismiss($, inbox.slice(0, inbox.lastIndexOf('/'))).catch(() => undefined)
   const text = await $.fs.read(inbox).catch(() => null)
   if (typeof text === 'string') {
     let msg: PetInbox | null = null
@@ -652,12 +687,93 @@ async function petPoll($: EngineInterface, gen: number, inbox: string, startedAt
       await petInbox($, msg).catch(() => undefined)
     }
   }
-  if (gen === petGen) $.clock.after(PET_POLL_MS, () => void petPoll($, gen, inbox, startedAt))
+  if (gen === petGen) $.clock.after(PET_POLL_MS, () => void petPoll($, gen, inbox, startedAt, n + 1))
+}
+
+/** The pet's "auto-dismiss finished agents after N minutes": read from pet-settings.json (off when missing or unreadable), applied as a dismissal. */
+async function petAutoDismiss($: EngineInterface, stateDir: string) {
+  const minutes = autoDismissOf(await $.fs.read(`${stateDir}/pet-settings.json`).catch(() => null))
+  if (minutes === 0) return
+  const [cards, set, acts, now] = await Promise.all([getCards($), getDismissed($), getActs($), $.clock.now()])
+  const next = autoDismissed(cards, set, acts, now, minutes)
+  if (!next) return
+  await update($, dismissed, () => next)
+  await queueWeb($)
 }
 
 const FOCUS_LINES = 12
 
+// ---------------------------------------------------------------- asking Claude from the pet, dismissing agents
+
+async function petNote($: EngineInterface, text: string) {
+  await say($, 'crew pet', text).catch(() => undefined)
+}
+
+/** Who a question is about: the card of an agent, or the main loop; null for a question with no agent or an id this session does not have. */
+async function askAbout($: EngineInterface, id: string | undefined): Promise<AskAbout | null> {
+  if (!id) return null
+  const [cards, events, files, m] = await Promise.all([getCards($), getEvents($), getFiles($), getMain($)])
+  if (id === 'main') return aboutOf({ id: 'main', type: 'main', status: m.isRunning ? 'running' : 'idle', description: 'the main loop of this session' }, events, files)
+  const card = cards.find(c => c.id === id)
+  return card ? aboutOf(card, events, files) : null
+}
+
+/**
+ * An ask, a dismiss or a stop from the pet. It is acted on only with this session's id and the token the mod gave the pet. What reaches
+ * the model is submitted framed (as a message of this plugin), never as the person's own words.
+ */
+async function petRequest($: EngineInterface, msg: PetInbox) {
+  const checked = checkPetMsg(msg, await petSession($), petToken)
+  if (!checked.ok) return petNote($, `ignored a pet ${String(msg.kind).slice(0, 12)} request: ${checked.why}`)
+  if (msg.kind === 'ask') return petAsk($, msg)
+  if (msg.kind === 'dismiss') {
+    const ids = Array.isArray(msg.ids) ? msg.ids.filter((x): x is string => typeof x === 'string' && x.length <= 200).slice(0, 100) : []
+    const next = dismiss(await getDismissed($), ids, await getCards($), await getActs($))
+    if (next.taken.length === 0) return
+    await update($, dismissed, () => next.set)
+    await queueWeb($)
+    return
+  }
+  // stop: a running agent of this session, by id
+  const card = typeof msg.id === 'string' ? (await getCards($)).find(c => c.id === msg.id) : undefined
+  if (!card || isFinished(card)) return petNote($, 'ignored a pet stop request: that agent is not running')
+  // $.agent has spawn, list and register only and $.turn.abort ends the main loop's turn: no call stops an agent, so the mod asks Claude to
+  // (running TaskStop through $.tool.call would skip the person's chance to see the request; not done).
+  void $.prompt.submit({ text: composeStop(card) }).catch(() => undefined)
+}
+
+async function petAsk($: EngineInterface, msg: PetInbox) {
+  const text = cleanAsk(msg.text)
+  if (!text) return petNote($, `ignored a pet question: empty or over ${ASK_MAX} characters`)
+  if (msg.mode !== 'send' && msg.mode !== 'draft') return petNote($, 'ignored a pet question: no mode')
+  const composed = composeAsk(text, await askAbout($, typeof msg.agentId === 'string' ? msg.agentId : undefined))
+  if (msg.mode === 'draft') {
+    // fill replaces the draft; a draft the person has typed already is kept, the question goes after it
+    const box = await $.prompt.read().catch(() => null)
+    const has = !!box && box.text.trim().length > 0
+    await $.prompt.fill(has ? { text: `\n\n${composed}`, mode: 'append' } : { text: composed, mode: 'replace' }).catch(() => undefined)
+    return
+  }
+  const now = await $.clock.now()
+  const key = text.slice(0, 80)
+  while (askWaits.length > 0 && now - (askWaits[0]?.at ?? now) > ASK_WAIT_MS) askWaits.shift()
+  askWaits.push({ key, at: now })
+  if (askWaits.length > 8) askWaits.shift()
+  const forget = () => {
+    const i = askWaits.findIndex(w => w.key === key && w.at === now)
+    if (i >= 0) askWaits.splice(i, 1)
+  }
+  // Not awaited: the call returns when the turn has started, which may be after the current one. No `asUser`: the model reads it as this plugin's message.
+  void $.prompt
+    .submit({ text: composed })
+    .then(r => {
+      if ((r as { drop?: string }).drop !== undefined) forget()
+    })
+    .catch(forget)
+}
+
 async function petInbox($: EngineInterface, msg: PetInbox) {
+  if (msg.kind === 'ask' || msg.kind === 'dismiss' || msg.kind === 'stop') return petRequest($, msg)
   if (msg.kind === 'focus-agent' && typeof msg.id === 'string') {
     const id = msg.id
     if ((await getCards($)).some(c => c.id === id)) await update($, view, x => ({ ...normalize(DEFAULT_VIEW, x), expanded: id }))
@@ -983,6 +1099,14 @@ export const register: Register = (on, options) => {
   }).catch(($, e, next) => next(e))
 
   on('turn.start', async ($, e, next) => {
+    // The turn a pet question started: its text holds the user's words (the engine may frame them), so a match by containment.
+    if (!e.agentId && e.text) {
+      const at = askWaits.findIndex(w => e.text.includes(w.key))
+      if (at >= 0) {
+        askWaits.splice(at, 1)
+        askTurns.add(e.turnId)
+      }
+    }
     const [now, cost] = await Promise.all([$.clock.now(), costNow($)])
     await update($, turn, () => ({ ...DEFAULT_TURN, startedAt: now, costAtStart: cost }))
     await update($, main, m => ({ ...normalize(DEFAULT_MAIN, m), isRunning: true }))
@@ -1234,6 +1358,8 @@ export const register: Register = (on, options) => {
         reason: e.reason,
       })
       await update($, receipt, () => r)
+      // Only the turn that came from a pet question gives the pet something to say.
+      if (askTurns.delete(e.turnId)) await update($, lastReply, () => replyOf(e.answer, e.reason, now))
       await update($, main, m => ({ ...normalize(DEFAULT_MAIN, m), isRunning: false }))
       await act($, 'main', e.reason === 'answer' ? 'done' : 'failed', '', '')
       await refreshStatus($, cfg)
@@ -1294,7 +1420,7 @@ export const register: Register = (on, options) => {
     const els = $.ui.resolve(e)
     const { Box, Text, Button } = els
     const hasClient = 'Client' in els
-    const [m, u, a, g, cards, lp, lines, t, r, v, now] = await Promise.all([
+    const [m, u, a, g, allCards, lp, allLines, t, r, v, now] = await Promise.all([
       getMain($),
       getUsage($),
       getArchitect($),
@@ -1307,7 +1433,11 @@ export const register: Register = (on, options) => {
       getView($),
       $.clock.now(),
     ])
-    const [ac, fl, pa, v3, pf] = await Promise.all([getActs($), getFiles($), getParents($), getView3d($), read($, petFocus)])
+    const [allActs, allFiles, allParents, v3, pf, dis] = await Promise.all([getActs($), getFiles($), getParents($), getView3d($), read($, petFocus), getDismissed($)])
+    // Dismissed agents (and the file links only they made) are not drawn; they come back when they work again.
+    const hiddenNow = hiddenIds(allCards, dis, allActs)
+    const { cards, acts: ac, files: fl, parents: pa } = withoutHidden({ cards: allCards, files: allFiles, acts: allActs, events: [], parents: allParents }, hiddenNow)
+    const lines = allLines.filter(l => !l.agentId || !hiddenNow.has(l.agentId))
     // Docked, the last column is the scrollbar's.
     const isDock = e.props.placement === 'dock'
     const W = Math.max(40, e.props.bodyColumns - (isDock ? 1 : 0))

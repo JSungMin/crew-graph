@@ -102,6 +102,12 @@ footer span{flex:1;color:var(--dim);font-size:11px}
       <label class="sw"><span>Reduce motion<small> no idle shuffles, fewer particles, a lower frame rate</small></span><input type="checkbox" id="reduce"></label>
     </div>
 
+    <h2>Agents</h2>
+    <div class="box">
+      <div class="row"><span class="lbl">Auto-dismiss finished agents<small>after this long; they come back if they work again</small></span><div class="seg" id="autoDismiss"><button data-min="0">Off</button><button data-min="5">5 min</button><button data-min="10">10 min</button><button data-min="30">30 min</button></div></div>
+    </div>
+    <div class="hint">Right-click a finished agent: Dismiss. Right-click anywhere: Dismiss all finished.</div>
+
     <h2>Window</h2>
     <div class="box">
       <label class="sw"><span>Always on top</span><input type="checkbox" id="onTop"></label>

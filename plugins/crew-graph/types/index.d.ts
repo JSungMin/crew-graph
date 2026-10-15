@@ -158,6 +158,9 @@ export type PetFocus = {
   at: number
 }
 
+/** The first words of Claude's answer to a question asked from the desktop pet; the pet shows them as a speech bubble. */
+export type LastReply = { at: number; text: string }
+
 /** The in-pane 3D view: on, its raster size in cells, and what went wrong if anything. */
 export type View3d = { isOn: boolean; cols: number; rows: number; status: string }
 
@@ -186,6 +189,10 @@ declare module 'claude-code' {
       view3d: View3d
       /** The file the desktop pet asked the pane to show; null when none or closed. */
       petFocus: PetFocus | null
+      /** Agents the desktop pet dismissed: agent id -> the state it was in then. Hidden from the snapshot and the pane until it works again. Cleared on /clear. */
+      dismissed: Record<string, string>
+      /** The answer to the latest question asked from the pet, clipped and masked; null when none. */
+      lastReply: LastReply | null
       /** The session's first prompt, shortened: the name on the desktop pet's nameplate. */
       sessionTitle: string
       /** How many rows the pane's tree has, as the engine last measured it; 0 until measured. */
