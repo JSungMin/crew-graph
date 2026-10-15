@@ -63,7 +63,7 @@ import {
 } from './deck/core'
 import type { Config, Panel } from './deck/core'
 import { bigFrame, miniFrame, propFrame } from './clawd'
-import { clip, dataJs, describeCall, pushEvent, shortPath, snapshotOf, touchFile, verbOfCard } from './crew'
+import { clip, dataJs, describeCall, pushEvent, shortPath, snapshotOf, touchFile, verbOfCard, scrollbar } from './crew'
 
 const PANE = 'crew-graph'
 const TITLE = 'Crew'
@@ -93,6 +93,7 @@ const parents = atom({ plugin: 'crew-graph', key: 'parents' } as const, {})
 const autoOpened = atom({ plugin: 'crew-graph', key: 'autoOpened' } as const, false)
 const web = atom({ plugin: 'crew-graph', key: 'web' } as const, { isOn: false, dir: '', lastWriteAt: 0 })
 const view3d = atom({ plugin: 'crew-graph', key: 'view3d' } as const, { isOn: false, cols: 0, rows: 0, status: '' })
+const paneRows = atom({ plugin: 'crew-graph', key: 'paneRows' } as const, 0)
 
 type ServerBlock = { type: string; id?: string; name?: string; tool_use_id?: string }
 
@@ -411,13 +412,17 @@ function blankCells(cols: number, rows: number): string {
 /** Pixels where the terminal draws them (kitty, Ghostty); colour cells everywhere else. */
 async function pickMode($: EngineInterface, want: string): Promise<'cells' | 'image'> {
   if (want === 'cells' || want === 'image') return want
-  const [term, prog, kitty, ghostty] = await Promise.all([
+  const [term, prog, kitty, ghostty, forced] = await Promise.all([
     $.env.get('TERM'),
     $.env.get('TERM_PROGRAM'),
     $.env.get('KITTY_WINDOW_ID'),
     $.env.get('GHOSTTY_RESOURCES_DIR'),
+    $.env.get('CLAUDE_CODE_FORCE_TERMINAL_IMAGES'),
   ])
-  const isPixel = /kitty/i.test(term ?? '') || /ghostty|kitty/i.test(prog ?? '') || Boolean(kitty) || Boolean(ghostty)
+  // Orca draws kitty Unicode placeholders once its terminal has them; Orca then sets the
+  // engine's image flag for the Claude it launches, so the flag is what tells.
+  const isOrcaPixels = prog === 'Orca' && Boolean(forced) && forced !== '0'
+  const isPixel = /kitty/i.test(term ?? '') || /ghostty|kitty/i.test(prog ?? '') || Boolean(kitty) || Boolean(ghostty) || isOrcaPixels
   return isPixel ? 'image' : 'cells'
 }
 
@@ -450,6 +455,27 @@ async function stop3d($: EngineInterface, status = '') {
 async function restart3d($: EngineInterface, cols: number, rows: number, fps: number, want: string) {
   isRestarting3d = false
   if ((await getView3d($)).isOn) await start3d($, cols, rows, fps, want)
+}
+
+// ---------------------------------------------------------------- pane scrollbar
+// The engine scrolls a pane's body (wheel, arrows, page keys) but draws no scrollbar, and the
+// render props carry the window, not the tree's height. A plugin scroll raises `ui.scroll` with
+// `contentRows`: the scroll hook keeps it and cancels that move, so measuring moves nothing.
+let isMeasuring = false
+let paneSig = ''
+let paneOffset = 0
+/** Where the 3D picture sits in the pane's tree (rows), while it is the first panel. */
+let region3d: { top: number; rows: number; cols: number } | null = null
+
+async function measurePane($: EngineInterface) {
+  isMeasuring = true
+  try {
+    await $.ui.scroll({ in: PANE, to: 'start' })
+  } catch {
+    // A pane not drawn now: measured the next time it is.
+  } finally {
+    isMeasuring = false
+  }
 }
 
 /** The pane's pointer events, forwarded to the renderer's page. */
@@ -910,9 +936,15 @@ export const register: Register = (on, options) => {
     return {}
   }).catch(($, e, next) => next(e))
 
-  // The wheel over the 3D view zooms it instead of scrolling the pane.
+  // Every move tells the tree's height (for the scrollbar); the wheel over the 3D picture zooms
+  // it instead of scrolling the pane.
   on('ui.scroll', { requestId: PANE }, async ($, e, next) => {
-    if (!pointerIn3d || !helper || e.by === 0 || e.origin.kind !== 'person') return next(e)
+    if (typeof e.contentRows === 'number' && e.contentRows !== (await read($, paneRows))) await update($, paneRows, () => e.contentRows)
+    if (isMeasuring && e.origin.kind !== 'person') return {}
+    const r3 = region3d
+    const at = e.pointer ? paneOffset + e.pointer.row : -1
+    const isOver3d = r3 && e.pointer ? at >= r3.top && at < r3.top + r3.rows && e.pointer.column < r3.cols : pointerIn3d
+    if (!isOver3d || !helper || e.by === 0 || e.origin.kind !== 'person') return next(e)
     await sendInput($, [{ kind: 'wheel', x: pointerAt.x, y: pointerAt.y, dy: Math.max(-10, Math.min(10, e.by)) }])
     return {}
   }).catch(($, e, next) => next(e))
@@ -937,7 +969,9 @@ export const register: Register = (on, options) => {
       $.clock.now(),
     ])
     const [ac, fl, pa, v3] = await Promise.all([getActs($), getFiles($), getParents($), getView3d($)])
-    const W = Math.max(40, e.props.bodyColumns)
+    // Docked, the last column is the scrollbar's.
+    const isDock = e.props.placement === 'dock'
+    const W = Math.max(40, e.props.bodyColumns - (isDock ? 1 : 0))
     const layout = v.layout ?? cfg.layout
     const isWide = layout === 'wide' || (layout === 'auto' && W >= 110)
     const colW = isWide ? Math.floor((W - 2) / 2) : W
@@ -1639,7 +1673,19 @@ export const register: Register = (on, options) => {
       column(panels, W)
     )
 
+    // The scrollbar: measured again whenever what the tree holds changes shape.
+    paneOffset = e.props.scroll?.offset ?? 0
+    region3d = v3.isOn && panels[0] === '3d' && !isWide ? { top: 3, rows: v3.rows, cols: v3.cols } : null
+    const sig = [panels.join(','), v3.isOn ? v3.rows : 0, isWide, W, bodyRows, cards.length, expandedCard ?? '', v.gateOpen ?? '', lp.length, showArchitect, shownLines.length, m.speed ? 1 : 0, m.isRunning, !!r].join('|')
+    if (sig !== paneSig) {
+      paneSig = sig
+      $.clock.after(80, () => void measurePane($))
+    }
+    const total = await read($, paneRows)
+    const bar = isDock ? scrollbar(paneOffset, bodyRows, total) : null
+
     return (
+      <Box width={W + (isDock ? 1 : 0)}>
       <Box flexDirection="column" width={W}>
         <Box justifyContent="center">
           <Text bold wrap="truncate">
@@ -1662,6 +1708,15 @@ export const register: Register = (on, options) => {
         </Box>
         {body}
         {svgLanes}
+      </Box>
+      {bar ? (
+        <Box position="absolute" top={bar.top} left={W} width={1} height={bodyRows} flexDirection="column">
+          {Array.from({ length: bodyRows }, (_, i) => {
+            const isThumb = i >= bar.thumbTop && i < bar.thumbTop + bar.thumbLen
+            return <Text color={isThumb ? C.main : C.faint}>{isThumb ? '┃' : '│'}</Text>
+          })}
+        </Box>
+      ) : null}
       </Box>
     )
   })

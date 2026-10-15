@@ -4,7 +4,7 @@ import { expect, mock, test } from 'claude-code/testing'
 import { bigFrame, miniFrame } from '../hooks/clawd'
 import { toEvent } from '../hooks/input3d'
 import { encodeCells, inkOf } from '../bin/cells.mjs'
-import { clip, describeCall, kindOf, pushEvent, snapshotOf, touchFile } from '../hooks/crew'
+import { clip, describeCall, kindOf, pushEvent, scrollbar, snapshotOf, touchFile } from '../hooks/crew'
 import { DEFAULT_ARCHITECT, DEFAULT_GATE, DEFAULT_MAIN, DEFAULT_TURN, DEFAULT_USAGE, normalizeCard } from '../hooks/deck/core'
 
 // ---------------------------------------------------------------- pure behaviour
@@ -268,4 +268,26 @@ test('/crew web inside Orca opens an Orca browser tab', async ($, on) => {
   const { text } = await $.command.run({ command: 'crew', args: 'web' } as never)
   expect(text).toContain('Orca browser tab')
   expect(runs).toEqual([['orca', 'tab', 'create', '--url', 'file:///C:/Users/me/.claude/crew-graph/index.html', '--json']])
+})
+
+test('the pane scrollbar: a thumb sized to the window, at its place, none when the tree fits', () => {
+  expect(scrollbar(0, 10, 10)).toBeNull()
+  expect(scrollbar(0, 10, 40)).toEqual({ top: 0, thumbTop: 0, thumbLen: 3 })
+  expect(scrollbar(30, 10, 40)).toEqual({ top: 30, thumbTop: 7, thumbLen: 3 })
+  // An offset past the end clamps, so the bar never makes the tree taller.
+  expect(scrollbar(99, 10, 40)?.top).toBe(30)
+})
+
+test('a docked pane taller than its window draws a scrollbar once the tree is measured', async ($, on) => {
+  engine(on)
+  on('ui.scroll', () => ({}))
+  await $.turn.start({ text: 'go', turnId: 'S1' })
+  const short = { ...pane(70), props: { ...pane(70).props, scroll: { offset: 0, bodyRows: 12 } } }
+  const before = await $.ui.mount({ ...short, surface: 'terminal' })
+  expect(await before.find({ text: /┃/ })).toBeUndefined()
+  await before.unmount()
+  await $.ui.scroll({ component: 'Pane', requestId: 'crew-graph', offset: 0, by: 1, bodyRows: 12, contentRows: 48, origin: { kind: 'person' } } as never)
+  const after = await $.ui.mount({ ...short, surface: 'terminal' })
+  expect(await after.find({ text: /┃/ })).toBeDefined()
+  await after.unmount()
 })
