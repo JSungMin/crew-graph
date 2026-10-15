@@ -157,6 +157,8 @@ export type SnapshotInput = {
   chars?: [string, string][]
   /** The answer to the latest question asked from the pet; left out of the snapshot when null. */
   lastReply?: LastReply | null
+  /** The newest pet request (its seq) the mod accepted; left out of the snapshot when 0. */
+  ack?: number
 }
 
 /** What the browser view reads (docs/DATA_CONTRACT.md, v1). */
@@ -234,6 +236,7 @@ export function snapshotOf(s: SnapshotInput) {
     gate: { allowed: g.rule, asked: g.cleared, denied: g.deny, pending: g.ask },
     ...(s.chars && s.chars.length > 0 ? { chars: s.chars } : {}),
     ...(s.lastReply ? { lastReply: s.lastReply } : {}),
+    ...(s.ack ? { petAck: s.ack } : {}),
     architect: {
       consults: s.architect.consults.length,
       running: isAdvising(s.architect),

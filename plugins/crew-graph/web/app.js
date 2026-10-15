@@ -1366,7 +1366,7 @@ function applySnapshot(s, fromDemo) {
     try { syncScene(s); processEvents(Array.isArray(s.events) ? s.events : [], s.now || Date.now()); }
     catch (err) { if (window.console) console.error('crew-graph scene', err); }
   }
-  if (overlay) { noteData(s); noteReply(s); return; }
+  if (overlay) { noteData(s); noteReply(s); noteAck(s); return; }
   renderHud(s);
 }
 // The assignment ("main=crab, Explore=bunny, *=random") arrives parsed in the snapshot as [[who, character], ...]
@@ -1636,6 +1636,7 @@ function overlayStep(dt, now) {
   // The grip is up whenever the pointer is in the window (it moved lately), so it can always be reached.
   document.body.classList.toggle('hot', now < hotUntil || sizing || (ptr.mx >= 0 && now - lastMoveAt < 4));
   placeBubble();
+  checkAck();
 }
 
 /* ---- shaking the window: the carry velocity (px/s) the main process sends, its direction reversals, and springs that make limbs follow through */
@@ -1959,7 +1960,31 @@ function sendAsk(mode) {
   pet.ask({ mode, text, agentId: askAgent });
   askText = ''; askTa.value = '';
   closeAsk();
-  showBubble('sent', mode === 'draft' ? '\u270e in the prompt box' : '\u2709 sent', 3);
+  showBubble('sent', mode === 'draft' ? '\u270e in the prompt box' : '\u2709 sent', ACK_WAIT);
+}
+/* A request (ask, dismiss, stop) is delivered when the snapshot's petAck reaches its seq. Without that within ACK_WAIT seconds there is no live
+   mod behind this window (a reload, an older mod): say so instead of leaving "sent" up. */
+const ACK_WAIT = 8;
+const unacked = [];
+function noteWrote(ev) { unacked.push({ seq: ev.seq, kind: ev.kind, t: nowS() }); busyUntil = Math.max(busyUntil, nowS() + ACK_WAIT); kick(); }
+function noteAck(s) {
+  const ack = Number(s.petAck) || 0, n = nowS();
+  for (let i = unacked.length - 1; i >= 0; i--) {
+    if (unacked[i].seq > ack) continue;
+    unacked.splice(i, 1);
+    if (bubbleKind === 'sent') bubbleUntil = Math.min(bubbleUntil, n + 2.5); // delivered: the "sent" bubble can go soon
+  }
+}
+function checkAck() {
+  const n = nowS();
+  for (let i = unacked.length - 1; i >= 0; i--) {
+    if (n - unacked[i].t < ACK_WAIT) continue;
+    const kind = unacked[i].kind;
+    unacked.length = 0;
+    showBubble('fail', '\u2709 not delivered: run /crew pet', 14);
+    tickerPush('not delivered (' + kind + '): run /crew pet in this session', '#ff5c5c');
+    return;
+  }
 }
 function showBubble(kind, text, secs) {
   if (!rbub) return;
@@ -2171,7 +2196,8 @@ if (overlay) {
       if (!ev) return;
       if (ev.type === 'hop') hopAll();
       else if (ev.type === 'ask') openAsk(ev.id);
-      else if (ev.type === 'sent') showBubble('sent', '\u2709 sent', 3);
+      else if (ev.type === 'sent') showBubble('sent', '\u2709 sent', ACK_WAIT);
+      else if (ev.type === 'wrote') noteWrote(ev);
       else if (ev.type === 'dismiss') { const n = nowS(); (Array.isArray(ev.ids) ? ev.ids : []).forEach((id, i) => { const a = agents.get(id); if (a && !a.bye) a.bye = n + i * 0.12; }); busyUntil = Math.max(busyUntil, n + 2.5 + (Array.isArray(ev.ids) ? ev.ids.length : 0) * 0.12); kick(); }
       else if (ev.type === 'reset-input') resetInput();
       else if (ev.type === 'reset') { autoFit = true; fitPending = true; busyUntil = Math.max(busyUntil, nowS() + 1); kick(); }

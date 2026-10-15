@@ -47,6 +47,7 @@ type Snapshot = {
   architect?: { consults: number; running: boolean; lastMs?: number }
   chars?: [who: string, character: string][]   // the `characters` option, parsed (see below); absent when the option is empty
   lastReply?: { at: number; text: string }     // the answer to the latest question asked from the desktop pet (see below); absent until there is one
+  petAck?: number                              // the seq of the newest desktop-pet request (ask, dismiss, stop) the mod accepted (see below); absent until there is one
 }
 
 type Verb = 'read' | 'edit' | 'search' | 'run' | 'web' | 'spawn' | 'plan' | 'think' | 'done' | 'failed' | 'wait'
@@ -104,7 +105,7 @@ type PetRequest = { seq: number; at: number; sessionId: string; token: string } 
 )
 ```
 
-`token` is made by the mod each time it starts the pet for a session (`launch.mjs --token`, handed to a running window by the second start) and never leaves the mod and the window; the mod acts only when `sessionId` is its own session and `token` its own, and logs and ignores any other request. `send` calls `$.prompt.submit({ text })`, framed as the plugin's (never `asUser`); `draft` calls `$.prompt.fill` (`replace`, or `append` when the prompt box already holds text). With `agentId`, `text` is followed by a short context block (type, id, status, task, last 5 event texts, files touched). `stop` asks Claude, in a framed prompt, to stop that agent when the mod knows it as running; the mod cannot stop an agent itself.
+`token` is made by the mod each time it starts the pet for a session (`launch.mjs --token`, handed to a running window by the second start) and never leaves the mod and the window; the mod acts only when `sessionId` is its own session and `token` its own, and logs and ignores any other request. `send` calls `$.prompt.submit({ text })`, framed as the plugin's (never `asUser`); `draft` calls `$.prompt.fill` (`replace`, or `append` when the prompt box already holds text). With `agentId`, `text` is followed by a short context block (type, id, status, task, last 5 event texts, files touched). `petAck` is the largest `seq` among the requests the mod accepted (right token and session), set before it acts on them, so the pet can tell a request reached a live mod: a request whose `seq` is above `petAck` eight seconds after the pet wrote it is shown as not delivered. A refused request does not raise it, and it starts again from none when the mod is reloaded. The mod records in its state that the pet is on for the session (`petOn`; `/crew pet` sets it, `/crew pet off [all]` clears it) and starts the pet again on `session.start` while it is set. `stop` asks Claude, in a framed prompt, to stop that agent when the mod knows it as running; the mod cannot stop an agent itself.
 
 ## Characters
 

@@ -112,6 +112,7 @@ const petFocus = atom({ plugin: 'crew-graph', key: 'petFocus' } as const, null)
 const sessionTitle = atom({ plugin: 'crew-graph', key: 'sessionTitle' } as const, '')
 const dismissed = atom({ plugin: 'crew-graph', key: 'dismissed' } as const, {})
 const lastReply = atom({ plugin: 'crew-graph', key: 'lastReply' } as const, null)
+const petOn = atom({ plugin: 'crew-graph', key: 'petOn' } as const, false)
 const paneRows = atom({ plugin: 'crew-graph', key: 'paneRows' } as const, 0)
 
 type ServerBlock = { type: string; id?: string; name?: string; tool_use_id?: string }
@@ -361,6 +362,7 @@ async function writeWeb($: EngineInterface) {
     receipt: r,
     chars: charRules,
     lastReply: reply,
+    ack: petAck,
   })
   const text = dataJs(snap)
   await $.fs.write(`${w.dir}/data.js`, text).catch(() => undefined)
@@ -478,6 +480,8 @@ let petSeen = 0
  * started, which also hands it to a window that is already running.
  */
 let petToken = ''
+/** The newest request (its `seq`) this mod accepted; in the snapshot as `petAck`. Zero again after a reload: the requests of the old mod are not acknowledged. */
+let petAck = 0
 /** Questions sent from the pet that have not started their turn yet (the session may be busy): the head of the user's text. */
 const askWaits: { key: string; at: number }[] = []
 /** The ids of the main-loop turns that came from a pet question; the answer of such a turn is the pet's `lastReply`. */
@@ -624,6 +628,8 @@ async function petStart($: EngineInterface): Promise<string> {
   await startWeb($, false)
   const p = await petPaths($)
   if (!p) return 'crew pet: no home directory to keep Electron in.'
+  // The pet is on for this session: state outlives a reload, so session.start can start it again (new token, inbox poll) when it comes back.
+  await update($, petOn, () => true)
   const bin = await petElectron($, p)
   if (bin) return petLaunch($, p, bin)
   if (petInstalling) return 'Electron is still downloading for the pet; it starts when that is done.'
@@ -640,6 +646,7 @@ async function petStart($: EngineInterface): Promise<string> {
 async function petStop($: EngineInterface, all: boolean): Promise<string> {
   petGen += 1
   petToken = ''
+  await update($, petOn, () => false)
   const p = await petPaths($)
   if (!p) return 'crew pet: no home directory.'
   const sid = await petSession($)
@@ -725,6 +732,11 @@ async function askAbout($: EngineInterface, id: string | undefined): Promise<Ask
 async function petRequest($: EngineInterface, msg: PetInbox) {
   const checked = checkPetMsg(msg, await petSession($), petToken)
   if (!checked.ok) return petNote($, `ignored a pet ${String(msg.kind).slice(0, 12)} request: ${checked.why}`)
+  // Received: the snapshot says so (`petAck`), which is how the pet knows a request got to a live mod. A request that is refused above gets none.
+  if (typeof msg.seq === 'number') {
+    petAck = Math.max(petAck, msg.seq)
+    await queueWeb($)
+  }
   if (msg.kind === 'ask') return petAsk($, msg)
   if (msg.kind === 'dismiss') {
     const ids = Array.isArray(msg.ids) ? msg.ids.filter((x): x is string => typeof x === 'string' && x.length <= 200).slice(0, 100) : []
@@ -1015,7 +1027,8 @@ export const register: Register = (on, options) => {
     cwd = String((e as { cwd?: string }).cwd ?? '')
     if (cfg.webOnStart) await startWeb($, false).catch(() => undefined)
     // Never awaited: a first start downloads Electron.
-    if (cfg.petOnStart) void petStart($).catch(() => undefined)
+    // petOnStart, or the pet was on when this session last ran (a reload, a resume): start it again, which hands the window a new token.
+    if (cfg.petOnStart || (await read($, petOn)) === true) void petStart($).catch(() => undefined)
     // A host without usage (headless, an SDK host, a session not yet bound) just starts without it.
     const u = await $.session.usage().catch(() => null)
     if (u) {

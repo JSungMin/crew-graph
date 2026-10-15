@@ -626,6 +626,8 @@ function putInbox(w, msg) {
     fs.writeFileSync(`${file}.tmp`, body)
     fs.renameSync(`${file}.tmp`, file)
     dbg(`inbox ${msg.kind}`)
+    // The page waits for the mod's acknowledgement (`petAck` in the snapshot) of the requests that need one.
+    if (msg.kind === 'ask' || msg.kind === 'dismiss' || msg.kind === 'stop') sendTo(w, { type: 'wrote', kind: msg.kind, seq: inboxSeq })
   } catch (e) {
     dbg(`inbox failed ${e && e.message}`)
   }

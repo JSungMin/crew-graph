@@ -1,4 +1,4 @@
-import type { On } from 'claude-code'
+﻿import type { On } from 'claude-code'
 import { expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 
@@ -116,7 +116,7 @@ const SID = 'sess-ask'
 const STATE = 'C:/Users/me/.claude/crew-graph'
 
 type Host = Awaited<ReturnType<typeof askHost>>
-async function askHost($: Engine, on: On, opts: { settings?: string } = {}) {
+async function askHost($: Engine, on: On, opts: { settings?: string; pet?: boolean } = {}) {
   const opened = { n: 0 }
   const clock = mock.clock(on)
   on('ui.status', () => ({ value: undefined }))
@@ -128,6 +128,7 @@ async function askHost($: Engine, on: On, opts: { settings?: string } = {}) {
   on('turn.complete', () => ({ text: '' }))
   on('tool.call', () => ({ result: 'ok', text: 'ok' }))
   on('session.end', (_$, e) => ({ sessionId: e.sessionId }))
+  on('command.register', () => ({ value: { command: 'crew' } }))
   const state = { spawned: 0, inbox: '', seq: 90_000, settings: opts.settings ?? '', box: { text: '', cursor: 0 } }
   const submits: { text: string; origin: unknown }[] = []
   const fills: { text: string; mode?: string }[] = []
@@ -162,7 +163,7 @@ async function askHost($: Engine, on: On, opts: { settings?: string } = {}) {
     state.spawned += 1
     return { model: 'claude-sonnet-5-5', agentId: `x${state.spawned}` }
   })
-  await $.command.run({ command: 'crew', args: 'pet' } as never)
+  if (opts.pet !== false) await $.command.run({ command: 'crew', args: 'pet' } as never)
   await $.command.run({ command: 'crew', args: 'web noopen' } as never)
   const launch = runs.find(r => /launch\.mjs$/.test(r[1] ?? '')) ?? []
   const token = launch[launch.indexOf('--token') + 1] ?? ''
@@ -177,6 +178,7 @@ async function askHost($: Engine, on: On, opts: { settings?: string } = {}) {
       agents: { id: string }[]
       files: { path: string; by: Record<string, string> }[]
       lastReply?: { at: number; text: string }
+      petAck?: number
     }
   }
   const spawnArgs = (subagentType: string, description: string, id: string) => ({
@@ -343,4 +345,65 @@ test('/clear forgets what was dismissed and the pending question', async ($, on)
   await $.turn.complete({ turnId: 'T9x', agentId: 'x1', answer: 'done', reason: 'answer', durationMs: 5 } as never)
   await h.clock.advance(600)
   expect(h.snap().agents.map(a => a.id)).toEqual(['main', 'x1'])
+})
+
+// ---------------------------------------------------------------- the pet survives a reload
+
+const launches = (h: Host) => h.runs.filter(r => /launch\.mjs$/.test(r[1] ?? '') && r.includes('--electron'))
+const tokenOf = (r: readonly string[] | undefined) => (r ?? [])[(r ?? []).indexOf('--token') + 1] ?? ''
+// nothing beneath the plugin answers session.start: its hook has done its work by then
+const startSession = ($: Engine) => $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/w' } as never).catch(() => undefined)
+
+test('session.start starts the pet again when it was on, with a new token; requests under the new token are taken, the old one not', async ($, on) => {
+  const h = await askHost($, on)
+  expect(launches(h)).toHaveLength(1)
+  const first = h.token
+  await startSession($)
+  await h.clock.advance(200)
+  expect(launches(h)).toHaveLength(2)
+  const second = tokenOf(launches(h)[1])
+  expect(second).toMatch(/^[0-9a-f]{32}$/)
+  expect(second).not.toBe(first)
+  // the inbox poll runs under the new token
+  await h.send({ kind: 'ask', mode: 'send', text: 'old window token' }, { token: first })
+  expect(h.submits).toHaveLength(0)
+  await h.send({ kind: 'ask', mode: 'send', text: 'new token' }, { token: second })
+  expect(h.submits).toHaveLength(1)
+})
+
+test('a session where the pet was never on starts nothing on session.start', async ($, on) => {
+  const never = await askHost($, on, { pet: false })
+  await startSession($)
+  await never.clock.advance(200)
+  expect(launches(never)).toHaveLength(0)
+})
+
+test('after /crew pet off, a new session.start does not start the pet', async ($, on) => {
+  const h = await askHost($, on)
+  await $.command.run({ command: 'crew', args: 'pet off' } as never)
+  await startSession($)
+  await h.clock.advance(200)
+  expect(launches(h)).toHaveLength(1)
+})
+
+test('after /crew pet off all, a new session.start does not start the pet', async ($, on) => {
+  const h = await askHost($, on)
+  await $.command.run({ command: 'crew', args: 'pet off all' } as never)
+  await startSession($)
+  await h.clock.advance(200)
+  expect(launches(h)).toHaveLength(1)
+})
+
+test('an accepted request is acknowledged in the snapshot (petAck = its seq); a refused one is not', async ($, on) => {
+  const h = await askHost($, on)
+  await h.send({ kind: 'ask', mode: 'send', text: 'refused' }, { token: 'wrong' })
+  await h.clock.advance(600)
+  expect(h.snap().petAck).toBeUndefined()
+  await h.send({ kind: 'ask', mode: 'draft', text: 'taken' })
+  await h.clock.advance(600)
+  expect(h.snap().petAck).toBe(h.state.seq)
+  // an accepted dismissal that finds nothing to dismiss is still delivered
+  await h.send({ kind: 'dismiss', ids: ['ghost'] })
+  await h.clock.advance(600)
+  expect(h.snap().petAck).toBe(h.state.seq)
 })

@@ -191,6 +191,8 @@ declare module 'claude-code' {
       petFocus: PetFocus | null
       /** Agents the desktop pet dismissed: agent id -> the state it was in then. Hidden from the snapshot and the pane until it works again. Cleared on /clear. */
       dismissed: Record<string, string>
+      /** True while the desktop pet is on for this session (`/crew pet` sets it, `/crew pet off` clears it): session.start starts the pet again after a reload or resume. */
+      petOn: boolean
       /** The answer to the latest question asked from the pet, clipped and masked; null when none. */
       lastReply: LastReply | null
       /** The session's first prompt, shortened: the name on the desktop pet's nameplate. */
