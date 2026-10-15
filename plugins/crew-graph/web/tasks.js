@@ -9,6 +9,10 @@
    - completed:    it is brought to the mouth, three chomps while it shrinks, crumbs, happy eyes, a hop; then the owner's "✓ N" counts it
    - an agent ticket: the child carries it along its link tube to its parent, who eats it
    - failed:       grey, and the owner sighs.  deleted: a puff of smoke.  blocked: a little lock on it, and the owner taps its foot
+   - a letter (src 'mail'): a report that reached main, an envelope on main's plate until the turn that reads it ends. Several pile up: that is the work queue.
+   - an assignment (src 'assign'): a job main gave a teammate, the teammate's own food on its plate; handed back and eaten by main when the teammate reports
+   - a bite: while an agent holds an item in progress, each tool call it makes is one small bite (a chomp, a "nom", crumbs, the item a little smaller)
+   - a count chip (3) on a plate that holds more than one item
    Only changes seen live are played: the first snapshot after a start or a reset is the baseline, so a reload does not replay old eats. */
 (function (root, factory) {
   const api = factory();
@@ -18,11 +22,15 @@
 'use strict';
 
 const STATUS = { pending: 1, in_progress: 1, completed: 1, failed: 1, deleted: 1 };
+const SRCS = { task: 1, agent: 1, turn: 1, mail: 1, assign: 1 };
 const isOpen = (s) => s === 'pending' || s === 'in_progress';
 const MAX_LIST = 80, SHOWN = 5;
 /* the eat, in seconds: grab the item off the plate and lift it to the mouth, three chomps, a swallow (2.3 s in all). Eats of one eater go one after another. */
 const EAT = { grab: 0.55, chomp: 0.42, chomps: 3, total: 2.3, gap: 0.25, pop: 1.5, last: 0.7, minPx: 14 };
 const CARRY_MIN = 0.6, CARRY_MAX = 1.6;
+/* a bite while working: at most one per `gap` seconds per agent, `backlog` waiting at most (a poll that saw six calls does not trail bites for seconds),
+   the item loses `step` of its size per bite down to `floor`, `crumbs` fly off, the chomp lasts `chomp` seconds */
+const BITE = { gap: 0.6, backlog: 3, step: 0.12, floor: 0.45, crumbs: 3, chomp: 0.3 };
 const FOOD_SCALE = 1.4; // food against the character: the pet window is small, a food at the crab's own scale reads as a speck
 
 /* ---------------------------------------------------------------- pure: the data */
@@ -34,7 +42,7 @@ function cleanList(raw) {
     if (!d || typeof d !== 'object' || typeof d.id !== 'string' || !d.id || !STATUS[d.status]) continue;
     out.push({
       id: d.id.slice(0, 200),
-      src: d.src === 'task' || d.src === 'agent' || d.src === 'turn' ? d.src : 'todo',
+      src: SRCS[d.src] === 1 ? d.src : 'todo',
       owner: typeof d.owner === 'string' && d.owner ? d.owner.slice(0, 200) : null,
       title: typeof d.title === 'string' ? d.title.slice(0, 200) : '',
       active: typeof d.active === 'string' ? d.active.slice(0, 200) : '',
@@ -73,6 +81,19 @@ function diff(prev, list, first) {
 /* who works on it and who eats it: an agent id from the snapshot, else main, else nobody */
 function agentFor(id, has, mainId) { return id != null && has(id) ? id : has(mainId) ? mainId : null; }
 const eaterId = (d) => d.deliverTo || d.owner || 'main';
+/* ---- bites: one per tool call of the agent that holds an item in progress */
+/* the size of an item after `n` bites (1 = whole): a step each, never below the floor */
+function biteScale(n) { return Math.max(BITE.floor, 1 - BITE.step * Math.max(0, n || 0)); }
+/* may an agent bite at `now` when its last bite was at `last` (undefined: never)? */
+function biteGate(last, now) { return last === undefined || now - last >= BITE.gap - 1e-9; }
+/* an agent's tool-call counter went from `prev` (undefined: not seen before) to `calls`, with `pend` bites waiting
+   -> { base: the counter to remember, pend: the bites waiting now }. A first sight or a counter that went down (a reset) bites nothing. */
+function callsStep(prev, calls, pend) {
+  if (!(prev >= 0) || !(calls >= prev)) return { base: calls >= 0 ? calls : 0, pend: 0 };
+  return { base: calls, pend: Math.min(BITE.backlog, (pend || 0) + (calls - prev)) };
+}
+/* the text of the plate's count chip: nothing for a plate of one or none (the item itself says it), else the number */
+const countChip = (n) => (n > 1 ? String(n) : '');
 /* Eats of one eater are queued: when `free` is the time its last scheduled eat ends, an eat of `dur` seconds asked for at `now` starts at
    -> { at, free } (the new free time, with a short gap so two eats do not run together). */
 function eatSlot(free, now, dur) {
@@ -114,9 +135,9 @@ const STATUS_WORD = { pending: 'waiting', in_progress: 'in progress', completed:
 /* the lines of the hover card: [[text, kind]]; kind 'b' bold, 's' normal, 'p' pale */
 function cardLines(d, ownerName, blocked) {
   const out = [[clipText(d.title || '(untitled)', 90), 'b']];
-  out.push([STATUS_WORD[d.status] + (blocked ? ' · blocked' : '') + (d.src === 'agent' ? ' · subagent' : d.src === 'task' ? ' · task' : d.src === 'turn' ? ' · prompt' : ' · to-do'), 's']);
-  if (ownerName) out.push([(d.src === 'agent' ? 'agent: ' : 'owner: ') + ownerName, 'p']); else out.push(['nobody has taken it', 'p']);
-  if (d.deliverTo && d.src === 'agent') out.push(['hands it to ' + d.deliverTo, 'p']);
+  out.push([STATUS_WORD[d.status] + (blocked ? ' · blocked' : '') + (d.src === 'agent' ? ' · subagent' : d.src === 'task' ? ' · task' : d.src === 'turn' ? ' · prompt' : d.src === 'mail' ? ' · letter' : d.src === 'assign' ? ' · assignment' : ' · to-do'), 's']);
+  if (ownerName) out.push([(d.src === 'agent' || d.src === 'assign' ? 'agent: ' : d.src === 'mail' ? 'for: ' : 'owner: ') + ownerName, 'p']); else out.push(['nobody has taken it', 'p']);
+  if (d.deliverTo && (d.src === 'agent' || d.src === 'assign')) out.push(['hands it to ' + d.deliverTo, 'p']);
   if (d.active && d.status === 'in_progress') out.push(['now: ' + clipText(d.active, 80), 'p']);
   return out;
 }
@@ -136,15 +157,20 @@ const FOODS = {
 };
 /* a prompt turn (src 'turn', proxy food when the model has no task tools): main eats each of the user's prompts as a rice ball, whoever main is */
 const TURN_FOOD = { key: 'riceball', crumb: '#f7f5ee', boxes: [bx(1.7, 1.3, 0.95, 0, -0.1, 0, '#f7f5ee'), bx(1.1, 0.7, 0.95, 0, 0.85, 0, '#f7f5ee'), bx(1.8, 0.55, 1.0, 0, -0.55, 0, '#1f2a24'), bx(0.25, 0.2, 1.0, -0.4, 0.2, 0, '#e3dfd2')] };
+/* a letter (src 'mail'): a report that reached main. An envelope, the flap folded, a red seal */
+const MAIL_FOOD = { key: 'envelope', crumb: '#f1ead8', boxes: [bx(2.3, 1.5, 0.35, 0, 0, 0, '#f1ead8'), bx(2.3, 0.2, 0.37, 0, -0.65, 0, '#d9cfb4'), bx(1.5, 0.3, 0.38, 0, 0.3, 0, '#e6dcc2'),
+  bx(0.9, 0.3, 0.38, 0, 0.05, 0, '#e6dcc2'), bx(0.34, 0.34, 0.4, 0, -0.1, 0, '#d9534f')] };
 const BUILTIN_FOOD = { crab: 'fish', bunny: 'carrot', cat: 'treat', mochi: 'seed', robot: 'battery' };
 // what each built-in does with its food while it works; any other character just fidgets
 const MOTION_OF = { crab: 'snip', bunny: 'nibble', cat: 'paw', mochi: 'roll', robot: 'hammer' };
 /* the food a character gets: its pack's own (a built-in id or boxes), else the built-in's, else the sunflower seed for a user's pack (a GLB
    has no food of its own); a paper ticket only when nobody holds it (no character) or `setting` says so: 'character' | 'ticket'
-   -> { key, boxes, crumb }. `src`: the task's source; a prompt turn ('turn') is a rice ball (the paper ticket setting still wins). */
+   -> { key, boxes, crumb }. `src`: the task's source; a prompt turn ('turn') is a rice ball, a letter ('mail') an envelope (the paper ticket setting
+   still wins); an assignment ('assign') is its teammate's own food, like any other item. */
 function foodFor(charId, def, setting, src) {
   if (setting === 'ticket') return { key: 'ticket', boxes: FOODS.ticket.boxes, crumb: FOODS.ticket.crumb };
   if (src === 'turn') return { key: TURN_FOOD.key, boxes: TURN_FOOD.boxes, crumb: TURN_FOOD.crumb };
+  if (src === 'mail') return { key: MAIL_FOOD.key, boxes: MAIL_FOOD.boxes, crumb: MAIL_FOOD.crumb };
   const f = def && def.food;
   if (f && f.boxes && f.boxes.length) return { key: 'own:' + charId, boxes: f.boxes, crumb: f.boxes[0].color === '@base' ? '#dddddd' : f.boxes[0].color };
   if (f && f.id && FOODS[f.id]) return { key: f.id, boxes: FOODS[f.id].boxes, crumb: FOODS[f.id].crumb };
@@ -165,7 +191,7 @@ function demo(h) {
     const x = get(n); if (!x) return;
     if (x.status !== status) x.t = Date.now();
     x.status = status; Object.assign(x, extra || {});
-    if (status === 'completed') { const e = x.owner || 'main'; D.eaten[e] = (D.eaten[e] || 0) + 1; }
+    if (status === 'completed') { const e = x.deliverTo || x.owner || 'main'; D.eaten[e] = (D.eaten[e] || 0) + 1; }
   };
   const drop = (n) => { D.tk = D.tk.filter((x) => x.id !== tid(n)); };
   const tickets = () => h.agents().filter((a) => a.id !== 'main' && !a.isArchitect).map((a) => ({ id: 'agent:' + a.id, src: 'agent', owner: a.id, title: a.description,
@@ -195,6 +221,11 @@ function demo(h) {
     [11.0, () => { add('t1', 'task', null, 'Review the release notes', 'pending'); add('t2', 'task', null, 'Tag the release', 'pending', { blockedBy: [tid('t1')] }); }],
     [4.6, () => add('q1', 'turn', 'main', 'Fix the loader and ship the release', 'in_progress', { active: 'working on your prompt' })],
     [11.0, () => set('q1', 'completed')], // the user's prompt: main eats it as a rice ball
+    [5.0, () => add('as1', 'assign', 'a1', 'map the loader', 'in_progress', { deliverTo: 'main' })], // a job main gave a teammate: it holds it until it reports
+    [5.4, () => add('as2', 'assign', 'a1', 'also check the tests', 'pending', { deliverTo: 'main' })], // a second one waits on its plate
+    [8.0, () => { add('l1', 'mail', 'main', 'from a3: the draft is ready', 'pending'); add('l2', 'mail', 'main', 'from a4: outline done', 'pending'); add('l3', 'mail', 'main', 'from a2: patch is in', 'pending'); }], // reports pile up on main's plate
+    [13.2, () => { set('l1', 'completed'); set('l2', 'completed'); set('l3', 'completed'); }], // the turn that reads them ends: main eats them one after another
+    [14.5, () => { set('as1', 'completed'); set('as2', 'in_progress'); }], // the report is handed back and eaten by main
     [12.5, () => { set('m2', 'completed'); set('m3', 'completed'); set('m4', 'completed'); }], // three at once: main eats them one after another from its stack
     [14.0, () => set('b2', 'failed')],
     [15.0, () => set('c2', 'deleted')],
@@ -247,8 +278,10 @@ function create(api) {
     stations: new Map(),                  // agent id -> { plate, eaten chip, more chip }
     table: null, own: new Map(),          // own: agent id -> what its pose needs this frame
     crumbs: [], puffs: [], crumbPool: makePool(), puffPool: makePool(), nomPool: makePool(), moving: false, seq: 0, lockTex: null, frame: 0,
+    plateN: new Map(),                    // agent id -> how many items wait on its plate (for the count chip, and the tests)
     eatFree: new Map(),                   // eater id -> when its last scheduled eat ends: the next one starts then
     noms: [], plus: [], nomTex: null, plusTex: null,   // the "nom" pops at the mouth, the "+1" flying to the counter
+    lastCalls: new Map(), bitePend: new Map(), biteLast: new Map(), bites: {}, biteLog: [], eatLog: [],   // bites: agent id -> its tool-call counter last seen, the bites waiting, when it last bit, how many it took; biteLog, eatLog: the bites and the eats in order (for the tests that drive the page)
   };
   const _v = new T.Vector3(), _w = new T.Vector3(), _m = new T.Vector3(), _c = new T.Color();
   const GREY = new T.Color(0x8d8d92);
@@ -322,7 +355,7 @@ function create(api) {
   function eaterAgent(d) { const id = agentFor(eaterId(d), (k) => agents.has(k), 'main'); return id == null ? null : agents.get(id); }
   function makeRec(d, mode) {
     const rec = { id: d.id, tk: true, d, mode, mt: nowS(), seq: ++S.seq, g: null, inner: null, mats: [], foodKey: '', crumb: '#ffffff', cur: new T.Vector3(), from: new T.Vector3(), has: false, flyT: -9, flyDur: 0,
-      scale: 0, born: nowS(), grey: 0, op: 1, lock: null, pos: new T.Vector3(), eat: null, poof: null, a: null, id2: d.id };
+      scale: 0, born: nowS(), grey: 0, op: 1, lock: null, pos: new T.Vector3(), eat: null, poof: null, a: null, id2: d.id, bites: 0, bsc: 1 };
     S.recs.set(d.id, rec);
     return rec;
   }
@@ -369,9 +402,23 @@ function create(api) {
       if (rec.mode !== 'eat' && rec.mode !== 'poof' && rec.mode !== 'fade') { rec.mode = 'fade'; rec.mt = now; }
     }
     for (const d of list) S.base.set(d.id, d.status);
+    noteCalls(s, first, live);
     S.inited = true; S.list = list;
     if (first || !live) Object.keys(S.eatenTarget).forEach((k) => S.eatenShown.set(k, S.eatenTarget[k]));
     if (live && ev.some((e) => e.k !== 'rest')) api.pulse(1500);
+  }
+  /* the agents' tool-call counters (`agents[].calls`): each call an agent makes while it holds an item in progress is one bite, taken in update().
+     The first snapshot is the baseline, a counter that went down (a reset) rebases, and at most BITE.backlog bites wait for one agent. */
+  function noteCalls(s, first, live) {
+    const seen = new Set();
+    for (const g of (s && Array.isArray(s.agents) ? s.agents : [])) {
+      if (!g || typeof g.id !== 'string' || !Number.isFinite(+g.calls)) continue;
+      seen.add(g.id);
+      const st = first || !live ? { base: +g.calls, pend: 0 } : callsStep(S.lastCalls.get(g.id), +g.calls, S.bitePend.get(g.id));
+      S.lastCalls.set(g.id, st.base); S.bitePend.set(g.id, st.pend);
+      if (st.pend > 0) api.pulse(1500);
+    }
+    S.lastCalls.forEach((_, id) => { if (!seen.has(id)) { S.lastCalls.delete(id); S.bitePend.delete(id); S.biteLast.delete(id); } });
   }
   function startPoof(rec, now) {
     rec.mode = 'poof'; rec.mt = now; rec.poof = { n: 0 };
@@ -395,6 +442,7 @@ function create(api) {
   function startEat(rec, d, now) {
     const c = carryOf(d), eater = c.eater, child = c.child, carry = c.carry, carryDur = c.dur;
     rec.mode = 'eat'; rec.mt = now; rec.wait = 0;
+    S.eatLog.push({ id: d.id, by: eater ? eater.id : null, t: +now.toFixed(2) }); if (S.eatLog.length > 300) S.eatLog.shift();
     rec.eat = { t0: now, carry: carry ? { dur: carryDur, child, parent: eater } : null, eaterId: eater ? eater.id : null, chomps: 0, from: new T.Vector3(), started: false };
     api.pulse(3000 + carryDur * 1000);
   }
@@ -404,19 +452,20 @@ function create(api) {
   }
   function ownerState(a) {
     let st = S.own.get(a.id);
-    if (!st) { st = { hold: null, eat: null, sighT: -9, blocked: false, motion: '', holdPrev: null }; S.own.set(a.id, st); }
+    if (!st) { st = { hold: null, eat: null, sighT: -9, biteT: -9, blocked: false, motion: '', holdPrev: null }; S.own.set(a.id, st); }
     return st;
   }
   function reset() {
     S.recs.forEach((r) => { world.remove(r.g); r.mats.forEach((x) => x.m.dispose()); if (r.lock) { world.remove(r.lock); r.lock.material.dispose(); } });
     S.recs.clear(); S.base.clear(); S.inited = false; S.list = []; S.blocked = new Set(); S.eatenTarget = {}; S.eatenShown.clear(); S.own.clear();
-    S.stations.forEach((st) => { world.remove(st.plate); disposeChip(st.eaten); disposeChip(st.more); }); S.stations.clear();
+    S.stations.forEach((st) => { world.remove(st.plate); disposeChip(st.eaten); disposeChip(st.more); disposeChip(st.count); }); S.stations.clear();
     if (S.table) { world.remove(S.table.g); disposeChip(S.table.more); S.table = null; }
     S.crumbs.forEach((c) => { c.m.visible = false; S.crumbPool.give(c); }); S.crumbs.length = 0;
     S.puffs.forEach((p) => { p.sp.visible = false; S.puffPool.give(p); }); S.puffs.length = 0;
     S.noms.forEach((n) => { n.sp.visible = false; S.nomPool.give(n); }); S.noms.length = 0;
     S.plus.forEach((n) => { n.sp.visible = false; world.remove(n.sp); n.sp.material.dispose(); }); S.plus.length = 0; // a "+1" has its own material: dispose it like stepFx does
     S.eatFree.clear();
+    S.lastCalls.clear(); S.bitePend.clear(); S.biteLast.clear(); S.bites = {}; S.biteLog.length = 0; S.eatLog.length = 0;
   }
 
   /* ---- stations: the plate beside an agent, the table by main */
@@ -434,7 +483,7 @@ function create(api) {
   }
   function stationOf(a) {
     let st = S.stations.get(a.id);
-    if (!st) { st = { plate: propGroup(PLATE), eaten: chipTex('✓ 0', '#5ee08a'), more: chipTex('+0', '#c3cadb'), a }; S.stations.set(a.id, st); }
+    if (!st) { st = { plate: propGroup(PLATE), eaten: chipTex('✓ 0', '#5ee08a'), more: chipTex('+0', '#c3cadb'), count: chipTex('2', '#ffd166'), a }; S.stations.set(a.id, st); }
     return st;
   }
   function tableOf() {
@@ -624,7 +673,8 @@ function create(api) {
       const a = ownerAgent(rec.d);
       if (!a || rec.d.status !== 'in_progress' || rec.mode === 'eat' || rec.mode === 'poof' || rec.mode === 'fade') continue;
       const cur = pickHold.get(a.id);
-      if (!cur || (cur.d.src === 'agent' && rec.d.src !== 'agent')) pickHold.set(a.id, rec);
+      const isTicket = (x) => x.d.src === 'agent' || x.d.src === 'assign';
+      if (!cur || (isTicket(cur) && !isTicket(rec))) pickHold.set(a.id, rec);
     }
     for (const rec of recs) {
       const d = rec.d, a = ownerAgent(d);
@@ -647,6 +697,7 @@ function create(api) {
     }
     // stations: plates with their stacks, the counters, the table
     const wanted = new Set();
+    S.plateN.clear();
     const placeStation = (a) => {
       const st = stationOf(a); wanted.add(a.id);
       const pp = platePos(a), list = plates.get(a.id) || [], shown = list.slice(0, SHOWN);
@@ -658,6 +709,11 @@ function create(api) {
       const hidden = Math.max(0, list.length - SHOWN);
       st.more.sp.visible = hidden > 0;
       if (hidden > 0) { paintChip(st.more, '+' + hidden, '#c3cadb'); toWorld(a, pp.x + 2.8, 3.6 + Math.min(list.length, SHOWN) * 0.5, pp.z, _v); st.more.sp.position.copy(_v); st.more.sp.scale.set(1.5, 0.5, 1); }
+      // how many wait on this plate, at a glance: the stack shows five at most
+      const cn = countChip(list.length);
+      st.count.sp.visible = cn !== '' && a.root.visible;
+      if (cn !== '') { paintChip(st.count, cn, '#ffd166'); toWorld(a, pp.x - 2.6, 2.3, pp.z + 1.6, _v); st.count.sp.position.copy(_v); st.count.sp.scale.set(1.5, 0.5, 1); }
+      S.plateN.set(a.id, list.length);
       const shownN = S.eatenShown.get(a.id) || 0;
       st.eaten.sp.visible = shownN > 0;
       if (shownN > 0) {
@@ -670,7 +726,7 @@ function create(api) {
     agents.forEach((a) => {
       if ((plates.get(a.id) || []).length || (S.eatenShown.get(a.id) || 0) > 0 || S.stations.has(a.id)) placeStation(a);
     });
-    S.stations.forEach((st, id) => { if (!wanted.has(id)) { world.remove(st.plate); disposeChip(st.eaten); disposeChip(st.more); S.stations.delete(id); } });
+    S.stations.forEach((st, id) => { if (!wanted.has(id)) { world.remove(st.plate); disposeChip(st.eaten); disposeChip(st.more); disposeChip(st.count); S.stations.delete(id); } });
     const mainA = agents.get('main') || null;
     if (table.length && mainA) {
       const tb = tableOf(), tp = tablePos(mainA);
@@ -745,6 +801,9 @@ function create(api) {
       if (age < 0.45) moving = true;
       let food = FOOD_SCALE * k * (rec.mode === 'hand' ? 1.15 : 1);
       if (rec.mode === 'hand' || rec.mode === 'eat') food *= boostFor(rec.hm || 1, food, pxPerWorld(tgt), EAT.minPx); // held and eaten: at least minPx tall on screen
+      const bt = reduce ? 1 : biteScale(rec.bites); // what the bites took (none with reduced motion)
+      if (Math.abs(bt - rec.bsc) > 0.002) { rec.bsc += (bt - rec.bsc) * (1 - Math.exp(-dt * 10)); moving = true; } else rec.bsc = bt;
+      food *= rec.bsc;
       if (rec.mode === 'eat' && rec.top !== rec.g) { // eaten: drawn over everything (the character's body, the link tubes)
         rec.top = rec.g;
         rec.mats.forEach((x) => { x.m.depthTest = false; x.m.needsUpdate = true; });
@@ -763,6 +822,7 @@ function create(api) {
         if (blocked) { rec.lock.position.set(tgt.x, tgt.y + 1.1 * k + 0.25, tgt.z); rec.lock.scale.setScalar(0.5); }
       }
     }
+    if (stepBites(holders, now, calm || reduce)) moving = true;
     // counters follow the eats; with nothing left to eat the number is simply the snapshot's
     const eating = new Set();
     for (const rec of S.recs.values()) { if (rec.mode === 'eat') eating.add(rec.eat && rec.eat.eaterId); else if (rec.wait) eating.add(rec.waitEater); }
@@ -776,6 +836,29 @@ function create(api) {
     stepFx(now, dt);
     S.moving = moving;
     S.own.forEach((st, id) => { if (!agents.has(id)) S.own.delete(id); });
+  }
+
+  /* The bites: an agent that holds an item in progress takes one for each tool call it made (noteCalls), at most one per BITE.gap seconds:
+     a small chomp, a "nom" at the mouth, a few crumbs, the item a step smaller (biteScale). Nothing while it is asleep or motion is reduced.
+     -> true while bites are waiting (the page keeps drawing) */
+  function stepBites(holders, now, still) {
+    let waiting = false;
+    S.bitePend.forEach((n, id) => {
+      const rec = holders.get(id), a = agents.get(id);
+      if (!rec || !a || !a.ch || still) { if (n > 0) S.bitePend.set(id, 0); return; } // nothing in hand (or nobody bites): the calls are not saved up
+      if (!(n > 0)) return;
+      if (!biteGate(S.biteLast.get(id), now)) { waiting = true; return; }
+      S.bitePend.set(id, n - 1); S.biteLast.set(id, now); S.bites[id] = (S.bites[id] || 0) + 1;
+      S.biteLog.push([id, +now.toFixed(3)]); if (S.biteLog.length > 400) S.biteLog.shift();
+      rec.bites += 1; ownerState(a).biteT = now;
+      const k = a.root.scale.x;
+      mouthWorld(a, _m); _f.copy(api.camera.position).sub(_m).normalize(); _m.addScaledVector(_f, 0.6 * k);
+      const plate = S.stations.has(id);
+      toWorld(a, platePos(a).x, 0, platePos(a).z, _l); _l.y += 0.45 * k;
+      crumb(_m, rec.crumb, BITE.crumbs, k, plate ? _l : null); nom(_m, k, now);
+      if (n - 1 > 0) waiting = true;
+    });
+    return waiting;
   }
 
   /* the eat of one item: [carry along the link], lift it off the plate to the front of the face, three chomps ("nom", crumbs that fall to the plate), a swallow,
@@ -853,6 +936,9 @@ function create(api) {
       if (e.happy) R.happy = true;
       R.by += 1.4 * e.hop;
     }
+    // a bite: a small chomp
+    const bt = now - st.biteT;
+    if (bt >= 0 && bt < BITE.chomp && !reduce) { const k = Math.sin(Math.PI * bt / BITE.chomp); R.mouth = Math.max(R.mouth, 0.8 * k); R.sy *= 1 - 0.04 * k; R.headX += 0.12 * k; }
     // failed: a sigh
     const sg = now - st.sighT;
     if (sg >= 0 && sg < 1.5 && !reduce) { const k = Math.sin(Math.PI * clamp(sg / 1.5, 0, 1)); R.headX += 0.5 * k; R.rx += 0.1 * k; R.esy *= 1 - 0.4 * k; R.by -= 0.15 * k; R.dA -= 0.2 * k; }
@@ -905,9 +991,11 @@ function create(api) {
     sync, update, pose, reset, pickAt, fillCard, tipText, cardKey, activeText,
     busy: () => S.on && S.moving,
     state: () => S,
-    counts: () => ({ on: S.on, visible: world.visible, crumbs: S.crumbs.length, recs: S.recs.size, modes: [...S.recs.values()].map((r) => r.id + ':' + r.mode), shown: [...S.eatenShown], moving: S.moving }),
+    counts: () => ({ on: S.on, visible: world.visible, crumbs: S.crumbs.length, recs: S.recs.size, modes: [...S.recs.values()].map((r) => r.id + ':' + r.mode), shown: [...S.eatenShown], moving: S.moving,
+      plates: [...S.plateN], chips: [...S.stations].map(([id, st]) => [id, st.count.sp.visible ? st.count.text : '']), bites: Object.assign({}, S.bites), biteLog: S.biteLog.slice(), pend: [...S.bitePend],
+      sizes: [...S.recs.values()].filter((r) => r.bites).map((r) => [r.id, r.bites, +r.bsc.toFixed(2)]), eats: S.eatLog.slice(), noms: S.noms.length }),
   };
 }
 
-return { demo, cleanList, blockedIds, diff, agentFor, eaterId, stackSlot, tableSlot, cardLines, FOODS, TURN_FOOD, BUILTIN_FOOD, MOTION_OF, foodFor, create, makePool, SHOWN, EAT, eatSlot, boostFor, foodHeight, eatSize };
+return { demo, cleanList, blockedIds, diff, agentFor, eaterId, stackSlot, tableSlot, cardLines, FOODS, TURN_FOOD, MAIL_FOOD, BUILTIN_FOOD, MOTION_OF, foodFor, create, makePool, SHOWN, EAT, BITE, eatSlot, boostFor, foodHeight, eatSize, biteScale, biteGate, callsStep, countChip };
 });

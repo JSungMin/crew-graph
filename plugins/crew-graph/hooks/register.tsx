@@ -69,8 +69,37 @@ import { BUILTIN_CHARACTERS, agentsFromDataJs, describeAgentPicks, describeChara
 import { ASK_MAX, aboutOf, autoDismissed, autoDismissOf, checkPetMsg, cleanAsk, composeAsk, composeStop, dismiss, dismissedOf, hiddenIds, isFinished, replyOf, withoutHidden } from './pet-ask'
 import type { AskAbout, PetMsg } from './pet-ask'
 import { absPath, clip, dataJs, describeCall, titleOf, pushEvent, shortPath, snapshotOf, touchFile, verbOfCard, scrollbar } from './crew'
-import { TASK_TOOLS, applyTaskCreate, applyTaskUpdate, applyTodoWrite, applyTurnEnd, applyTurnQueued, applyTurnStart, bumpEaten, createdId, normalizeBook, tasksOf } from './tasks'
-import { USER_ORIGINS, foodFromOf, hasNativeTaskTools, proxyFoodOn, setupReport } from './setup'
+import {
+  TASK_TOOLS,
+  addresseeOf,
+  applyAssign,
+  applyAssignDone,
+  applyMailDrop,
+  applyMailEnd,
+  applyMailIn,
+  applyMailStart,
+  applyTaskCreate,
+  applyTaskUpdate,
+  applyTodoWrite,
+  applyTurnEnd,
+  applyTurnQueued,
+  applyTurnStart,
+  assignTitle,
+  bumpEaten,
+  createdId,
+  isProtocolText,
+  looksLikeUser,
+  mailFromOf,
+  mailForTurn,
+  mailKey,
+  mailParse,
+  mailTitle,
+  noteMailFrom,
+  normalizeBook,
+  tasksOf,
+} from './tasks'
+import type { MailFrom, MailWait } from './tasks'
+import { USER_ORIGINS, foodFromOf, hasNativeTaskTools, isMailOrigin, proxyFoodOn, setupReport } from './setup'
 import type { FoodFrom, SetupState } from './setup'
 
 const PANE = 'crew-graph'
@@ -112,7 +141,7 @@ const acts = atom({ plugin: 'crew-graph', key: 'acts' } as const, {})
 const files = atom({ plugin: 'crew-graph', key: 'files' } as const, [])
 const events = atom({ plugin: 'crew-graph', key: 'events' } as const, [])
 const parents = atom({ plugin: 'crew-graph', key: 'parents' } as const, {})
-const tasks = atom({ plugin: 'crew-graph', key: 'tasks' } as const, { todo: [], task: [], turn: [], eaten: {} })
+const tasks = atom({ plugin: 'crew-graph', key: 'tasks' } as const, { todo: [], task: [], turn: [], mail: [], assign: [], eaten: {} })
 const setup = atom({ plugin: 'crew-graph', key: 'setup' } as const, { native: null })
 const autoOpened = atom({ plugin: 'crew-graph', key: 'autoOpened' } as const, false)
 const web = atom({ plugin: 'crew-graph', key: 'web' } as const, { isOn: false, dir: '', lastWriteAt: 0 })
@@ -247,8 +276,10 @@ async function resetAll($: EngineInterface) {
   await update($, files, () => [])
   await update($, events, () => [])
   await update($, parents, () => ({}))
-  await update($, tasks, () => ({ todo: [], task: [], turn: [], eaten: {} }))
+  await update($, tasks, () => ({ todo: [], task: [], turn: [], mail: [], assign: [], eaten: {} }))
   turnQueue.length = 0
+  mailWaits.length = 0
+  mailFroms = []
   await update($, sessionTitle, () => '')
   // The dismissed set belongs to the agents that were just cleared; a pending question to the pet is not answered any more.
   await update($, dismissed, () => ({}))
@@ -330,9 +361,11 @@ async function noteTurnQueued($: EngineInterface, text: string) {
 /**
  * Main's turn starts: a prompt of the user's (or a question typed into the pet, titled by the user's words, not the frame) is an item in
  * progress; a turn the engine opened with a tagged message (a hand-back, a task notification) is not. A queued prompt's pending item becomes it.
+ * A turn opened by a letter never gets here (noteMailStart took it, by the origin its prompt carried); the text check is the fallback for a
+ * turn whose origin was not seen.
  */
 async function noteTurnStart($: EngineInterface, turnId: string, text: string, askKey: string) {
-  if (!(askKey || (text.trim() && promptLine(text).who === 'you'))) return
+  if (!(askKey || (text.trim() && looksLikeUser(text)))) return
   const now = await $.clock.now()
   const title = askKey || text
   let at = turnQueue.findIndex(q => text.includes(q.key) || title.includes(q.key))
@@ -345,6 +378,95 @@ async function noteTurnStart($: EngineInterface, turnId: string, text: string, a
 async function noteTurnEnd($: EngineInterface, turnId: string, reason: string) {
   const now = await $.clock.now()
   await update($, tasks, b => applyTurnEnd(normalizeBook(b), turnId, reason, now))
+}
+
+// ---------------------------------------------------------------- mail and assignments (the work queue; on whatever the food setting is)
+// A letter is a message that reaches main from a teammate, a task or another session (the prompt's origin says so). It waits on main's plate
+// and is eaten when the main turn that reads it ends. An assignment is a job main gave a teammate; the teammate holds it until it reports.
+
+/** Letters that reached main and have not opened a turn yet, and the sightings of who sent what (hooks/tasks.ts). */
+const mailWaits: MailWait[] = []
+let mailFroms: MailFrom[] = []
+let mailSeq = 0
+const MAIL_WAIT_MAX = 20
+const MAIL_WAIT_TTL_MS = 5 * 60_000
+
+/** A letter reached main. Returns its id. Registered before the prompt goes on: the turn it opens starts inside that call. */
+async function noteMailIn($: EngineInterface, text: string, kind: string, turnId: string | undefined): Promise<string> {
+  const now = await $.clock.now()
+  mailSeq += 1
+  const mid = `${now.toString(36)}-${mailSeq}`
+  const { from, summary } = mailParse(text, kind, mailFromOf(mailFroms, text, now))
+  if (turnId === undefined) {
+    mailWaits.push({ mid, key: mailKey(text), at: now })
+    if (mailWaits.length > MAIL_WAIT_MAX) mailWaits.shift()
+  }
+  await update($, tasks, b => applyMailIn(normalizeBook(b), mid, mailTitle(from, summary), now, turnId))
+  await queueWeb($)
+  return mid
+}
+
+/** The prompt of a letter was dropped by another hook: the letter never reached main. */
+async function noteMailDrop($: EngineInterface, mid: string) {
+  const at = mailWaits.findIndex(w => w.mid === mid)
+  if (at >= 0) mailWaits.splice(at, 1)
+  await update($, tasks, b => applyMailDrop(normalizeBook(b), mid))
+  await queueWeb($)
+}
+
+/** Main's turn starts: the letter that opened it (if one did) is its work. Returns whether a letter opened it. */
+async function noteMailStart($: EngineInterface, turnId: string, text: string): Promise<boolean> {
+  const now = await $.clock.now()
+  for (let i = mailWaits.length - 1; i >= 0; i -= 1) if (now - (mailWaits[i]?.at ?? now) > MAIL_WAIT_TTL_MS) mailWaits.splice(i, 1)
+  const wait = mailForTurn(mailWaits, text)
+  if (wait) mailWaits.splice(mailWaits.indexOf(wait), 1)
+  await update($, tasks, b => applyMailStart(normalizeBook(b), turnId, now, wait?.mid))
+  return wait !== undefined
+}
+
+async function noteMailEnd($: EngineInterface, turnId: string, reason: string) {
+  const now = await $.clock.now()
+  await update($, tasks, b => applyMailEnd(normalizeBook(b), turnId, reason, now))
+}
+
+/** Cards already checked against the engine's agent list this load, so the list is asked for once per card. */
+const matesChecked = new Set<string>()
+
+/**
+ * A card made before this version has no `isTeammate`; the engine's agent list knows (`teammateId` is there for a teammate and for no other agent).
+ * The flag is written back, so the card stops being a ticket and its idle flips stop being eaten. Returns the cards, flags settled.
+ */
+async function settleTeammates($: EngineInterface, rows?: readonly { id: string; teammateId?: string }[]): Promise<AgentCard[]> {
+  let cards = await getCards($)
+  const todo = cards.filter(c => !c.isTeammate && !matesChecked.has(c.id))
+  if (todo.length === 0) return cards
+  const list = rows ?? (await $.agent.list().catch(() => null))
+  if (!list) return cards
+  const mates = new Set(todo.filter(c => list.some(r => r.id === c.id && r.teammateId)).map(c => c.id))
+  for (const c of todo) matesChecked.add(c.id)
+  if (mates.size === 0) return cards
+  await update($, agents, l => listOf<unknown>(l).map(normalizeCard).map(c => (mates.has(c.id) ? { ...c, isTeammate: true } : c)))
+  cards = await getCards($)
+  return cards
+}
+
+/** A message left an agent for another: main giving a teammate a job, or a teammate reporting to the lead. */
+async function noteSend($: EngineInterface, from: string | undefined, to: unknown, text: string) {
+  if (typeof to !== 'string') return
+  const listed = await $.agent.list().catch(() => null)
+  const rows = listed ?? []
+  const cards = await settleTeammates($, listed ?? undefined)
+  const target = addresseeOf(to, [...rows.map(r => ({ id: r.id, name: r.name, teammateId: r.teammateId })), ...cards.map(c => ({ id: c.id, name: c.type }))])
+  const mate = (id: string) => cards.find(c => c.id === id)?.isTeammate === true
+  const now = await $.clock.now()
+  if (from === undefined) {
+    if (target && mate(target)) await update($, tasks, b => applyAssign(normalizeBook(b), target, assignTitle(undefined, text), 'main', now))
+  } else if (mate(from) && !target) {
+    // a teammate's message to the lead is its report: the oldest job it holds is handed back
+    mailFroms = noteMailFrom(mailFroms, text, cards.find(c => c.id === from)?.type ?? '', now)
+    await update($, tasks, b => applyAssignDone(normalizeBook(b), from, false, now))
+  } else return
+  await queueWeb($)
 }
 
 // ---------------------------------------------------------------- crew
@@ -429,7 +551,7 @@ async function writeWeb($: EngineInterface) {
     getUsage($),
     getArchitect($),
     getGate($),
-    getCards($),
+    settleTeammates($),
     getTurn($),
     read($, receipt),
     getActs($),
@@ -1221,11 +1343,29 @@ export const register: Register = (on, options) => {
 
   // A prompt typed while a turn runs waits for its turn: it is a pending item on main's plate (when the prompt turns are food).
   on('prompt.submit', async ($, e, next) => {
+    // A letter (a teammate's report, a task notification, another session's message) is told apart by the origin the engine stamped, not by its text.
+    // It is registered before the prompt goes on: a letter that opens a turn starts that turn inside next().
+    const mid = !e.command && isMailOrigin(e.origin.kind) && e.text.trim() && !isProtocolText(e.text) ? await noteMailIn($, e.text, e.origin.kind, e.turnId).catch(() => undefined) : undefined
     const r = await next(e)
+    if (mid !== undefined && r.drop !== undefined) await noteMailDrop($, mid).catch(() => undefined)
     if (r.drop === undefined && e.turnId !== undefined && !e.command && !e.isMeta && USER_ORIGINS.includes(e.origin.kind) && r.text.trim() && (await proxyOn($))) {
       await noteTurnQueued($, r.text)
     }
     return r
+  }).catch(($, e, next) => next(e))
+
+  // Who sent a message: a mailbox delivery names its teammate. Observe only; nothing is consumed or rewritten.
+  on('session.receive', async ($, e, next) => {
+    const from = 'teammate' in e.origin ? e.origin.teammate : ''
+    if (!e.agentId && from && !isProtocolText(e.text)) mailFroms = noteMailFrom(mailFroms, e.text, from, await $.clock.now())
+    return next(e)
+  }).catch(($, e, next) => next(e))
+
+  // A message leaving an agent: main giving a teammate a job, a teammate reporting to the lead. Observe only.
+  on('session.send', async ($, e, next) => {
+    const sent = await next(e)
+    if (sent.isDelivered && !isProtocolText(e.text)) await noteSend($, e.agentId, e.to, e.text).catch(() => undefined)
+    return sent
   }).catch(($, e, next) => next(e))
 
   on('classic.UserPromptSubmit', async ($, e, next) => {
@@ -1255,7 +1395,10 @@ export const register: Register = (on, options) => {
         askTurns.add(e.turnId)
       }
     }
-    if (!e.agentId && (await proxyOn($))) await noteTurnStart($, e.turnId, e.text ?? '', askKey).catch(() => undefined)
+    if (!e.agentId) {
+      const isLetter = await noteMailStart($, e.turnId, e.text ?? '').catch(() => false)
+      if (!isLetter && (await proxyOn($))) await noteTurnStart($, e.turnId, e.text ?? '', askKey).catch(() => undefined)
+    }
     const [now, cost] = await Promise.all([$.clock.now(), costNow($)])
     await update($, turn, () => ({ ...DEFAULT_TURN, startedAt: now, costAtStart: cost }))
     await update($, main, m => ({ ...normalize(DEFAULT_MAIN, m), isRunning: true }))
@@ -1490,8 +1633,15 @@ export const register: Register = (on, options) => {
       model: started.model,
       description: e.description,
       spawnedAt: await $.clock.now(),
+      ...(e.isTeammate ? { isTeammate: true } : {}),
     }
     await update($, agents, list => [...listOf<unknown>(list).map(normalizeCard), card].slice(-24))
+    // A teammate's spawn is its first job (it is handed back to whoever spawned it when the teammate reports).
+    if (e.isTeammate) {
+      const now = await $.clock.now()
+      await update($, tasks, b => applyAssign(normalizeBook(b), id, assignTitle(e.description, e.prompt), parent, now))
+      await queueWeb($)
+    }
     await update($, loops, l => listOf<Loop>(l).filter(x => x.id !== id))
     await say($, shorten(cardTitle(card), 12), `spawned · ${card.type}`, 'info', id)
     await refreshStatus($, cfg)
@@ -1516,6 +1666,7 @@ export const register: Register = (on, options) => {
       await update($, main, m => ({ ...normalize(DEFAULT_MAIN, m), isRunning: false }))
       await act($, 'main', e.reason === 'answer' ? 'done' : 'failed', '', '')
       await noteTurnEnd($, e.turnId, e.reason).catch(() => undefined)
+      await noteMailEnd($, e.turnId, e.reason).catch(() => undefined)
       await refreshStatus($, cfg)
       await queueWeb($)
       return done
@@ -1533,8 +1684,11 @@ export const register: Register = (on, options) => {
           .map(normalizeCard)
           .map(c => (c.id === id ? { ...c, status, endedAt: now, answer: shorten(e.answer, 400) } : c)),
       )
-      // A finished subagent hands its ticket to the parent, who eats it (the counter the pet shows).
-      if (status === 'done') {
+      // A finished subagent hands its ticket to the parent, who eats it (the counter the pet shows). A teammate goes idle after every message,
+      // so its end is no delivery: what it was given is closed here instead, and counted when it is.
+      if ((await settleTeammates($)).find(c => c.id === id)?.isTeammate) {
+        await update($, tasks, b => applyAssignDone(normalizeBook(b), id, true, now, e.reason))
+      } else if (status === 'done') {
         const eater = (await getParents($))[id] ?? 'main'
         await update($, tasks, b => bumpEaten(normalizeBook(b), eater))
       }

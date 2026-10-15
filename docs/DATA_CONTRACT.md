@@ -111,14 +111,15 @@ type PetRequest = { seq: number; at: number; sessionId: string; token: string } 
 
 ## Tasks
 
-`tasks` lists what the agents have to do, from four sources, as one list. Every title is one line, credentials masked, cut to about 80 cells (`active` to about 60; a `turn` title to about 60).
+`tasks` lists what the agents have to do, from six sources, as one list. Every title is one line, credentials masked, cut to about 80 cells (`active` to about 60; a `turn` title to about 60).
 
 ```ts
 type Task = {
   id: string                  // stable and namespaced: "todo:<agent>:<hash of the content>" (a repeat of the same text in one list gets "#2"...),
                               // "task:<id>" for TaskCreate / TaskUpdate, "agent:<agent id>" for a subagent's ticket,
-                              // "turn:<turn id>" for a prompt turn of the main loop (a waiting prompt: "turn:q<n>" until its turn starts)
-  src: 'todo' | 'task' | 'agent' | 'turn'
+                              // "turn:<turn id>" for a prompt turn of the main loop (a waiting prompt: "turn:q<n>" until its turn starts),
+                              // "mail:<n>" for a letter that reached main, "assign:<agent id>:<n>" for a job given to a teammate
+  src: 'todo' | 'task' | 'agent' | 'turn' | 'mail' | 'assign'
   owner?: string              // the agent working on it ("main" or an agent id); absent for a task nobody took
   title: string
   active?: string             // the present-continuous form ("Running tests"), for while it is in progress
@@ -133,8 +134,11 @@ type Task = {
 - **`task`** is `TaskCreate` (its id comes from the result's `task.id`) and `TaskUpdate` (`status`, `subject`, `activeForm`, `addBlockedBy`, `owner`). The owner is the agent that last set the task `in_progress`, or the `owner` field when it names a known agent (an id, or the type or name it was started under); a task nobody took has no owner.
 - **`agent`** is a ticket for every subagent card, so there are tickets even when no agent uses the task tools. `owner` is the child, `title` its description, `deliverTo` its parent. `running` is `in_progress`, `done` is `completed`, `failed` and `stopped` are `failed`. An architect started as a consult has no card, so no ticket.
 - **`turn`** is proxy food, for a session whose model has no task tools (and on request, see *food from* in the guide): each prompt the user sends is one item owned by `main`. `title` is the prompt (the user's own words; a question typed into the pet is titled by those words, not by the frame the engine puts round it), one line, credentials masked, about 60 cells. It is `pending` while it waits behind a running turn, `in_progress` while its turn runs, `completed` when the turn answers (`main` eats it) and `failed` when the turn is aborted or ends in an error or a refusal. Turns the engine opens on its own (a hand-back, a task notification) and subagents' turns are not items. A page that does not know `turn` can read it as `todo` (an item with an owner and a status).
+- **`mail`** is a letter: a message that reached the main loop from a teammate, a background task or another session. The mod tells it from the user's own prompt by the origin the engine stamped on the prompt (`task-notification`, `peer`, `peer-send-message`, `coordinator`, `projects-relay`, `channel`; a prompt the user typed is `composer`, `bridge` or `slack-ping`), never by its text. `owner` is `main`; `title` is "from <sender>: <short summary>" (one line, credentials masked, about 80 cells). It is `pending` while main is busy (several can wait), `in_progress` when it opens a turn of its own, `completed` when the main turn that reads it answers (main's `eaten` goes up by one for each), `failed` when that turn is aborted or errors. A letter nobody read in 30 minutes leaves the list. These messages are not `turn` items. Not behind the *food from* setting.
+- **`assign`** is a job main gave a teammate (an agent started with `isTeammate`): its spawn, and each `SendMessage` main sends it. `owner` is the teammate, `deliverTo` the one who gave it (`main`), `title` the spawn's description or the message's first line. The teammate holds the oldest open one (`in_progress`); later ones are `pending` on its plate. When the teammate sends its report to the lead the oldest is `completed` (handed back, and eaten by `deliverTo`) and the next is taken in hand; when the teammate goes idle, whatever is open is `completed` (or `failed` when its turn was aborted or errored). A teammate has **no** `agent` ticket: its card flips between `idle` and `completed` with every message, so it says nothing about its work.
 - **What is listed:** every open task (up to 40; the subagent tickets come first, so the cap never cuts one), the last 10 closed ones (`completed`, `failed`), and `deleted` ones for 5 s after they were deleted, so the page can play the smoke puff.
-- **`eaten`** counts, per agent, the tasks that turned `completed` since the session began (or `/crew reset`): the counter does not shrink when old closed tasks fall out of the list, and it is back to nothing after `/crew reset`. A ticket counts for the parent; a `task` for its owner, or for `main` when it has none; a `turn` for `main`.
+- **Bites.** While an agent holds an item `in_progress`, the page takes one small bite for each tool call the agent makes: it reads the agent's `calls` (the counter in `agents[]`, which only goes up) from one snapshot to the next, so there is no extra field. The first snapshot is the baseline, a counter that went down rebases, at most three bites wait per agent, and one is taken per agent about every 0.6 s.
+- **`eaten`** counts, per agent, the tasks that turned `completed` since the session began (or `/crew reset`): the counter does not shrink when old closed tasks fall out of the list, and it is back to nothing after `/crew reset`. A ticket counts for the parent; a `task` for its owner, or for `main` when it has none; a `turn` and a `mail` for `main`; an `assign` for `deliverTo`.
 
 ## Characters
 

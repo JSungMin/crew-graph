@@ -65,6 +65,8 @@ export type AgentCard = {
   lastStop: string | null
   tools: ToolNote[]
   answer: string
+  /** True for a teammate (agent.spawn's `isTeammate`): it goes idle between messages, so its card flips and says nothing about its work. */
+  isTeammate?: boolean
 }
 
 /** A model loop whose id matches no card: a workflow agent, a compaction or a memory fork. */
@@ -145,9 +147,9 @@ export type CrewEvent = {
 export type TaskStatus = 'pending' | 'in_progress' | 'completed' | 'failed' | 'deleted'
 
 export type TaskItem = {
-  /** Namespaced and stable: `todo:<agent>:<hash of the content>`, `task:<id>`, `agent:<agent id>`, `turn:<turn id>`. */
+  /** Namespaced and stable: `todo:<agent>:<hash of the content>`, `task:<id>`, `agent:<agent id>`, `turn:<turn id>`, `mail:<n>`, `assign:<agent id>:<n>`. */
   id: string
-  src: 'todo' | 'task' | 'agent' | 'turn'
+  src: 'todo' | 'task' | 'agent' | 'turn' | 'mail' | 'assign'
   /** The agent working on it ('main' or an agent id); absent for a task nobody took. */
   owner?: string
   title: string
@@ -158,12 +160,18 @@ export type TaskItem = {
   blockedBy?: string[]
   /** An agent's ticket: the parent that eats it when it is done. */
   deliverTo?: string
+  /** A letter: the id of the main turn that reads it (it is eaten when that turn ends). Kept in the book, left out of the snapshot. */
+  bound?: string
   /** When the status last changed (ms since the epoch). */
   t: number
 }
 
-/** What the mod keeps of the tasks: the to-do items of every agent, the shared tasks, the prompt turns (proxy food), and how many each agent has finished. Tickets are not stored (they come from the cards). */
-export type TaskBook = { todo: TaskItem[]; task: TaskItem[]; turn: TaskItem[]; eaten: Record<string, number> }
+/**
+ * What the mod keeps of the tasks: the to-do items of every agent, the shared tasks, the prompt turns (proxy food), the letters that
+ * reached main (`mail`), the assignments given to teammates (`assign`), and how many each agent has finished. The subagent tickets are not
+ * stored (they come from the cards).
+ */
+export type TaskBook = { todo: TaskItem[]; task: TaskItem[]; turn: TaskItem[]; mail: TaskItem[]; assign: TaskItem[]; eaten: Record<string, number> }
 
 /** Parent links the engine reports for subagents (agent id -> parent agent id, 'main' for the main loop). */
 export type Parents = Record<string, string>

@@ -51,6 +51,7 @@ The first `/crew pet` installs Electron (~100 MB) once, in the background, and o
 | **Click** a file | Opens it |
 | **Hover** a character or a file | A card: status and steps, or a file summary |
 | Watch the **tasks** | Each to-do item is food: on a plate while it waits, in hand while it is worked on, eaten when it is done. Hover one for a card |
+| Watch the **work queue** | Reports that reach main pile up on its plate as envelopes (with a count), a teammate holds the jobs it was given, and an agent takes a small bite for each tool call while it works |
 | **Right-click** | `Character ▸`, `Ask Claude…`, `Settings…`, open, copy path |
 | **Right-click** a finished agent | `Dismiss` (it waves and pops away); a running one: `Ask Claude to stop it` |
 | Wheel · Ctrl+wheel · right-drag | Zoom · resize · rotate |
