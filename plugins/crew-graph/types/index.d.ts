@@ -144,6 +144,9 @@ export type Parents = Record<string, string>
 
 export type Web = { isOn: boolean; dir: string; lastWriteAt: number }
 
+/** The in-pane 3D view: on, its raster size in cells, and what went wrong if anything. */
+export type View3d = { isOn: boolean; cols: number; rows: number; status: string }
+
 declare module 'claude-code' {
   interface PluginState {
     'crew-graph': {
@@ -166,6 +169,7 @@ declare module 'claude-code' {
       frame: number
       autoOpened: boolean
       web: Web
+      view3d: View3d
     }
   }
 }

@@ -177,3 +177,38 @@ test('/crew web copies the viewer and writes data.js for the browser', async ($,
   expect(snap.agents[0].id).toBe('main')
   expect(snap.events.some((x: { kind: string }) => x.kind === 'prompt')).toBe(true)
 })
+
+test('/crew 3d streams the renderer frames into the pane raster', async ($, on) => {
+  const clock = engine(on)
+  const blits: { key: string; columns?: number; rows?: number }[] = []
+  let spawned: readonly string[] = []
+  on('env.get', (_$, e) => ({ value: e.name === 'USERPROFILE' ? '/home/me' : undefined }))
+  on('fs.read', (_$, e) => ({ value: `// ${e.path}` }))
+  on('fs.write', () => ({ value: undefined }))
+  on('session.id', () => ({ value: 's3d' }))
+  on('ui.blit', (_$, e) => {
+    blits.push({ key: e.key, columns: e.columns, rows: e.rows })
+    return { value: {} }
+  })
+  // 20x8 cells of '▀' on black/white, as bin/crew-3d.mjs prints them.
+  const words = new Uint32Array(20 * 8 * 3)
+  for (let i = 0; i < 160; i += 1) words.set([0x2580, 0x000000, 0xffffff], i * 3)
+  let bin = ''
+  for (const b of new Uint8Array(words.buffer)) bin += String.fromCharCode(b)
+  const cells = btoa(bin)
+  on('process.spawn', async function* (_$, e) {
+    spawned = e.argv
+    yield { stream: 'stdout' as const, text: `C 20 8 ${cells.slice(0, 100)}` }
+    yield { stream: 'stdout' as const, text: `${cells.slice(100)}\nC 20 ` }
+    yield { stream: 'stdout' as const, text: `8 ${cells}\n` }
+    return { value: { code: 0, signal: null } }
+  })
+  const { text } = await $.command.run({ command: 'crew', args: '3d 20' } as never)
+  expect(text).toContain('20x20')
+  // Let the renderer loop drain its pieces.
+  for (let i = 0; i < 20 && blits.length < 2; i += 1) await clock.advance(10)
+  expect(spawned.some(a => a.endsWith('bin/crew-3d.mjs'))).toBe(true)
+  expect(spawned.join(' ')).toContain('--cols 20')
+  expect(blits.length).toBe(2)
+  expect(blits[0]).toEqual({ key: 'crew3d', columns: 20, rows: 8 })
+})

@@ -1,7 +1,7 @@
 {
   "name": "crew-graph",
-  "version": "0.2.0",
-  "description": "Live agent dashboard with Clawd crabs: model vitals, permission gate, architect, subagent cards, the agent tree and plan/doc graph, plus a three.js web view of how agents interact (absorbs Flightdeck)",
+  "version": "0.3.0",
+  "description": "Live agent dashboard with Clawd crabs: model vitals, permission gate, architect, subagent cards, the agent tree and plan/doc graph, and a three.js 3D view of agents interacting, in the pane (/crew 3d) or the browser (/crew web). Absorbs Flightdeck",
   "types": "./types/index.d.ts",
   "author": {
     "name": "JSungMin",
@@ -42,9 +42,9 @@
     },
     "panels": {
       "title": "Panels",
-      "description": "Comma-separated panels in display order: main, crew, architect, gate, agents, loops, receipt, log. Leave one out to hide it.",
+      "description": "Comma-separated panels in display order: 3d, main, crew, architect, gate, agents, loops, receipt, log. Leave one out to hide it.",
       "type": "string",
-      "default": "main,crew,architect,gate,agents,loops,receipt,log"
+      "default": "3d,main,crew,architect,gate,agents,loops,receipt,log"
     },
     "motion": {
       "title": "Motion",
@@ -113,6 +113,18 @@
       "description": "Start writing the 3D browser view data (~/.claude/crew-graph/data.js) when a session starts; /crew web does it on demand",
       "type": "boolean",
       "default": false
+    },
+    "view3dFps": {
+      "title": "3D view frame rate",
+      "description": "Frames per second of the in-pane 3D view (/crew 3d), 1-20",
+      "type": "number",
+      "default": 8
+    },
+    "view3dRows": {
+      "title": "3D view height",
+      "description": "Rows the in-pane 3D view takes (/crew 3d), 8-60",
+      "type": "number",
+      "default": 20
     }
   }
 }

@@ -93,8 +93,8 @@ export const normalizeLog = (stored: unknown): LogLine[] =>
 
 // ---------------------------------------------------------------- config
 
-export type Panel = 'main' | 'crew' | 'architect' | 'gate' | 'agents' | 'loops' | 'receipt' | 'log'
-const PANELS: readonly Panel[] = ['main', 'crew', 'architect', 'gate', 'agents', 'loops', 'receipt', 'log']
+export type Panel = '3d' | 'main' | 'crew' | 'architect' | 'gate' | 'agents' | 'loops' | 'receipt' | 'log'
+const PANELS: readonly Panel[] = ['3d', 'main', 'crew', 'architect', 'gate', 'agents', 'loops', 'receipt', 'log']
 
 export type Config = {
   architect: RegExp
@@ -111,6 +111,9 @@ export type Config = {
   statusLine: boolean
   /** crew-graph: start the browser view's data export when a session starts. */
   webOnStart: boolean
+  /** crew-graph: the in-pane 3D view's frame rate and height in rows. */
+  view3dFps: number
+  view3dRows: number
 }
 
 const safeRegExp = (source: string, fallback: string) => {
@@ -145,6 +148,8 @@ export const parseConfig = (o: Readonly<Record<string, unknown>>): Config => {
     openOnStart: bool('openOnStart', true),
     statusLine: bool('statusLine', true),
     webOnStart: bool('webOnStart', false),
+    view3dFps: typeof o.view3dFps === 'number' ? Math.min(20, Math.max(1, Math.round(o.view3dFps))) : 8,
+    view3dRows: typeof o.view3dRows === 'number' ? Math.min(60, Math.max(8, Math.round(o.view3dRows))) : 20,
   }
 }
 

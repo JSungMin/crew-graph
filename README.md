@@ -22,6 +22,7 @@ crew-graph absorbs **[Flightdeck](https://github.com/scasella/claude-flightdeck)
 
 | Panel | Shows |
 | --- | --- |
+| **3d** | The three.js view itself, inside the pane (`/crew 3d`): a headless browser renders it, and the pane draws it as half-block colour cells, two pixels a cell. |
 | **main** | Model, effort, permission mode and request count. A context gauge with compactions (⟲). Cost and rate-limit windows with reset countdowns. Time to first token and tok/s. |
 | **crew** | Clawd for the main loop (big) and for each subagent (mini), animated per action. The subagent tree, with grandchildren. Every plan, doc and code file a loop touched, with who read (`r`) or wrote (`w`) it. |
 | **architect** | Consults on a timeline, and the inferred moment of each one. |
@@ -46,6 +47,18 @@ crew-graph absorbs **[Flightdeck](https://github.com/scasella/claude-flightdeck)
 | done / failed | — | Cheers `✓` / X eyes `✗` |
 
 The crabs animate on the surface's own frame clock, so the pane does not redraw for them.
+
+## 3D view in the pane
+
+```text
+/crew 3d
+```
+
+- **How it works:** `bin/crew-3d.mjs` opens the same viewer in a headless Chrome or Edge. It shrinks each frame to the pane's size and streams it as Raster cells. The mod blits each frame in place, about 8 frames a second (`view3dFps`), in a panel `view3dRows` rows tall (default 20). Labels are dropped and the camera frames tighter, because a cell holds only two pixels.
+- **Size and teardown:** when the pane width changes, the renderer restarts at the new size. When the pane is closed for about 5 s, or on `/crew 3d off`, the browser is stopped.
+- **Needs:** Node 22+ on `PATH`, and Chrome, Edge or Chromium (or `CREW_CHROME=<path>`).
+- **Isolation:** the browser runs headless with a throwaway profile, over `--remote-debugging-pipe`. It opens no port, and it exits when the renderer process does.
+- **Where it shows:** terminal only (Raster). In the desktop app, use `/crew web`.
 
 ## 3D web view
 
@@ -86,6 +99,7 @@ If you also have Flightdeck installed, turn it off. crew-graph includes all of i
 | `/crew` | Open the pane. It also opens by itself on session start (`openOnStart`) and once on the first subagent. |
 | `/crew close` · `/crew reset` | Close the pane, or clear the agents, checks, consults, log, files and events. |
 | `/crew layout auto\|compact\|wide\|mini` | Set the layout for this session. |
+| `/crew 3d [off]` | The 3D view inside the pane. |
 | `/crew web [noopen\|off]` | The 3D browser view. |
 
 Focus the pane with `ctrl+x tab`:
@@ -96,15 +110,15 @@ Focus the pane with `ctrl+x tab`:
 
 All of Flightdeck's options apply. Set them in `/config` or under `pluginConfigs["crew-graph"].options`:
 - `architectPattern`, `architectLabel`, `gateLabel`, `panels`, `motion`, `moments`, `matchDescriptions`, `maxCards`, `layout`, `palette`, `openOnStart`, `statusLine`
-- `webOnStart` (crew-graph only)
+- `webOnStart`, `view3dFps` and `view3dRows` (crew-graph only)
 
-The default `panels` value is `main,crew,architect,gate,agents,loops,receipt,log`.
+The default `panels` value is `3d,main,crew,architect,gate,agents,loops,receipt,log`. The 3d panel shows only while `/crew 3d` runs.
 
 ## What it can reach
 
 The mod only watches: every hook passes its event on unchanged, and a hook that throws passes the event on. It does reach outside the session in three places:
 - **Files:** it writes files only under `~/.claude/crew-graph/`, and only after `/crew web` (or `webOnStart`).
-- **Processes:** it starts one process, the OS "open" command (`explorer`, `open` or `xdg-open`), when `/crew web` opens the page.
+- **Processes:** it starts the OS "open" command (`explorer`, `open` or `xdg-open`) when `/crew web` opens the page. With `/crew 3d` it also starts `node bin/crew-3d.mjs`, which starts a headless browser.
 - **Network:** none. three.js r158 is bundled in `web/three.min.js` (MIT).
 
 What it keeps:
