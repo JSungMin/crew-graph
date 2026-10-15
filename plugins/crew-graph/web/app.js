@@ -1550,6 +1550,7 @@ if (renderer) {
   const plate = overlay ? $('plate') : null;
   const onDown = (e) => {
     ptr.down = true; ptr.btn = e.button; ptr.x = ptr.sx = e.clientX; ptr.y = ptr.sy = e.clientY; ptr.moved = 0; lastInteract = nowS();
+    dg.downs += 1; dg.lastDownAt = Date.now(); dlog('down', `btn ${e.button} at ${Math.round(e.clientX)},${Math.round(e.clientY)} on ${e.currentTarget === el ? 'canvas' : 'plate'}`);
     ptr.ssx = e.screenX; ptr.ssy = e.screenY;
     // a left drag that starts on a crab pets it instead of rotating the camera (in the pet it carries the window)
     ptr.pet = !overlay && e.button === 0 && !e.shiftKey ? crabAt(e.clientX, e.clientY) : null; ptr.st = null;
@@ -1590,7 +1591,9 @@ if (renderer) {
     } else { cam.theta -= dx * 0.006; cam.phi = clamp(cam.phi - dy * 0.005, 0.12, 1.5); }
   };
   const up = (e) => {
-    if (!ptr.down) return; ptr.down = false;
+    if (!ptr.down) { dlog('up-no-down', `btn ${e.button}`); return; } ptr.down = false;
+    if (overlay) { needProbe = true; kick(); } // the button no longer holds the click-through open: look at what is under the pointer
+    dg.ups += 1; dg.lastUpAt = Date.now(); dlog('up', `btn ${e.button} moved ${Math.round(ptr.moved)} carry=${!!carry}`);
     if (overlay) { overlayUp(e); return; }
     if (ptr.pet && ptr.moved >= 5) ptr.pet.re.petUntil = Math.min(ptr.pet.re.petUntil, nowS());
     ptr.pet = null;
@@ -1601,8 +1604,8 @@ if (renderer) {
       setDetail();
     }
   };
-  const cancel = () => { ptr.down = false; ptr.pet = null; if (carry) endCarry(); };
-  const lost = () => { ptr.down = false; ptr.pick = null; if (carry) endCarry(); };
+  const cancel = () => { ptr.down = false; ptr.pet = null; if (carry) endCarry(); if (overlay) { needProbe = true; kick(); } };
+  const lost = () => { ptr.down = false; ptr.pick = null; if (carry) endCarry(); if (overlay) { needProbe = true; kick(); } };
   el.addEventListener('pointerdown', onDown); el.addEventListener('pointermove', onMove); el.addEventListener('pointerup', up);
   el.addEventListener('pointercancel', cancel); el.addEventListener('lostpointercapture', lost);
   if (plate) {
@@ -1631,6 +1634,7 @@ if (renderer) {
   });
 }
 function resize() {
+  if (overlay) dlog('resize', `${innerWidth}x${innerHeight} dpr ${window.devicePixelRatio} pr ${renderer ? renderer.getPixelRatio() : '-'}`);
   if (!renderer) return;
   renderer.setSize(innerWidth, innerHeight);
   camera.aspect = innerWidth / Math.max(1, innerHeight); camera.updateProjectionMatrix();
@@ -1650,15 +1654,40 @@ let busyUntil = 0;            // something is animating until then (s)
 let needProbe = false, overContent = false, sentIgnore = true, missN = 0, hotUntil = 0;
 let lastResizeBy = 0, pokedAt = -999, lastChangeAt = nowS(), snapSig = '', dozing = true, wasDozing = false, introDone = false;
 let frameTimer = 0;
+/* ---- input diagnostics (web/input-diag-core.js): what the click-through and the pointer did, kept in a ring. overlay/main.js asks for it
+   (window.__crewInputDiag) and writes it to a file when a window is folded to its title bar or from the tray; nothing else reads it. */
+const DG = overlay && window.CrewInputDiag ? window.CrewInputDiag : null;
+const dring = DG ? DG.makeRing(DG.RING_CAP) : null;
+const dlog = (k, s) => { if (dring) dring.add(k, s); };
+const dg = { frames: 0, lastFrameAt: 0, maxGap: 0, errors: 0, moves: 0, lastMoveAt: 0, curEvents: 0, lastCurAt: 0, downs: 0, ups: 0, lastDownAt: 0, lastUpAt: 0, probes: 0, probe: null, ignoreSent: 0, lastIgnoreAt: 0, lostAt: 0, restoredAt: 0, lastReset: '', resets: 0, restarts: 0, lateRuns: 0, lateLogAt: 0, rafLate: 0 };
 const mk = (tag, cls, text) => { const d = document.createElement(tag); if (cls) d.className = cls; if (text != null) d.textContent = text; return d; };
 const clipStr = (t, n) => { t = String(t == null ? '' : t); return t.length > n ? t.slice(0, n - 1) + '…' : t; };
 const unitsPerPx = (p) => 2 * camera.position.distanceTo(p) * Math.tan(camera.fov * Math.PI / 360) / Math.max(1, innerHeight);
-const probeBuf = new Uint8Array(5 * 5 * 4);
+let probeBuf = new Uint8Array(5 * 5 * 4);
 
 /* ---- schedule: rAF alone would wake the page 60 times a second even when nothing moves */
+const RAF_WAIT_MS = 120;     // an animation frame that has not come by then is not waited for
+const LATE_FRAME_MS = 600;   // input that finds the frame loop this late runs a frame itself
 function schedule(ms) {
   if (frameTimer) clearTimeout(frameTimer);
-  frameTimer = setTimeout(() => { frameTimer = 0; requestAnimationFrame(frame); }, Math.max(0, ms));
+  frameTimer = setTimeout(() => {
+    frameTimer = 0;
+    // The loop also probes the click-through, so it must not depend on animation frames alone: a window that presents nothing gets very few
+    // (about one a second in a test with a window that was never shown), and the loop would crawl. The timer runs the frame when the animation frame is late.
+    let ran = false;
+    const run = () => { if (ran) return; ran = true; frame(); };
+    requestAnimationFrame(run);
+    if (overlay) setTimeout(() => { if (!ran) dg.rafLate += 1; run(); }, RAF_WAIT_MS);
+  }, Math.max(0, ms));
+}
+/* Input reaches a page whose timers and animation frames are held back; when it finds the loop late it runs a frame itself. */
+function lateFrame() {
+  if (!overlay || !dg.lastFrameAt) return;
+  const late = Date.now() - dg.lastFrameAt;
+  if (late <= LATE_FRAME_MS) return;
+  dg.lateRuns += 1;
+  if (Date.now() - dg.lateLogAt > 10000) { dg.lateLogAt = Date.now(); dlog('late-frame', `input found the frame loop ${late} ms late: ran a frame`); }
+  frame();
 }
 function kick() { if (overlay && frameTimer) schedule(0); }
 function isBusy(n) {
@@ -2128,15 +2157,25 @@ function noteMove() { lastMoveAt = nowS(); needProbe = true; busyUntil = Math.ma
 function setOver(v) {
   overContent = v;
   if (v) hotUntil = nowS() + 1.5; // the grip stays up long enough to reach it
-  const ignore = !(v || carry || sizing);
-  if (ignore !== sentIgnore) { sentIgnore = ignore; if (pet) pet.setIgnore(ignore); }
+  const ignore = !CrewInputDiag.wantsClicks({ over: v, carry: !!carry, sizing, down: ptr.down });
+  if (ignore !== sentIgnore) {
+    sentIgnore = ignore; dg.ignoreSent += 1; dg.lastIgnoreAt = Date.now();
+    dlog('ign-req', `${ignore ? 'click-through' : 'takes clicks'} (over=${v} carry=${!!carry} sizing=${sizing})`);
+    if (pet) pet.setIgnore(ignore);
+  }
 }
 function glHit(x, y) {
   const gl = renderer.getContext(), dpr = renderer.getPixelRatio(), bw = gl.drawingBufferWidth, bh = gl.drawingBufferHeight;
-  const x0 = clamp(Math.round(x * dpr) - 2, 0, Math.max(0, bw - 5)), y0 = clamp(Math.round(bh - y * dpr - 1) - 2, 0, Math.max(0, bh - 5)); // GL's y runs up
-  gl.readPixels(x0, y0, 5, 5, gl.RGBA, gl.UNSIGNED_BYTE, probeBuf);
-  for (let i = 3; i < probeBuf.length; i += 4) if (probeBuf[i] > 40) return true;
-  return false;
+  // A halo: a drawn pixel within HALO_PX of the pointer counts. One read of a block around it, scanned for the disc.
+  const r = Math.max(2, Math.min(Math.ceil(CrewInputDiag.HALO_PX * dpr), (Math.min(bw, bh) - 1) >> 1)), n = 2 * r + 1;
+  if (probeBuf.length < n * n * 4) probeBuf = new Uint8Array(n * n * 4);
+  const cx = Math.round(x * dpr), cy = Math.round(bh - y * dpr - 1); // GL's y runs up
+  const x0 = clamp(cx - r, 0, Math.max(0, bw - n)), y0 = clamp(cy - r, 0, Math.max(0, bh - n));
+  gl.readPixels(x0, y0, n, n, gl.RGBA, gl.UNSIGNED_BYTE, probeBuf);
+  // the pointer's own place in the block (the block is pushed inward at an edge of the canvas)
+  const a = CrewInputDiag.haloAlpha(probeBuf, n, r, cx - x0, cy - y0);
+  dg.alpha = a;
+  return a > CrewInputDiag.HALO_ALPHA;
 }
 function domHit(x, y) {
   const el = document.elementFromPoint(x, y);
@@ -2155,10 +2194,20 @@ function domHit(x, y) {
 function probeHit() {
   if (!needProbe || !pet) return;
   needProbe = false;
-  if (carry || sizing) { setOver(true); return; }
-  if (ptr.mx < 0) { missN = 2; setOver(false); return; }
-  if (domHit(ptr.mx, ptr.my) || (!collapsed && glHit(ptr.mx, ptr.my))) { missN = 0; setOver(true); return; }
+  if (carry || sizing || ptr.down) { setOver(true); return; } // held by a carry, a resize or a button pressed on content: the release must come here
+  if (ptr.mx < 0) { missN = 2; noteProbe('out'); setOver(false); return; }
+  if (domHit(ptr.mx, ptr.my)) { missN = 0; noteProbe('dom'); setOver(true); return; }
+  if (!collapsed && glHit(ptr.mx, ptr.my)) { missN = 0; noteProbe('gl'); setOver(true); return; }
+  noteProbe('miss');
   if (++missN >= 2) setOver(false); else needProbe = true;
+}
+// The last probe is kept; the ring gets the probes whose outcome differs from the one before (hundreds a minute would flood it).
+function noteProbe(how) {
+  dg.probes += 1;
+  const p = dg.probe;
+  dg.probe = { t: Date.now(), how, x: Math.round(ptr.mx), y: Math.round(ptr.my), a: dg.alpha == null ? -1 : dg.alpha };
+  dg.alpha = null;
+  if (!p || p.how !== how) dlog('probe', `${how} at ${dg.probe.x},${dg.probe.y}${how === 'miss' || how === 'gl' ? ' alpha=' + dg.probe.a : ''}`);
 }
 
 /* ---- carrying the window, the corner grip, clicks on files */
@@ -2208,11 +2257,41 @@ function applyPet(s) {
   needProbe = true; busyUntil = Math.max(busyUntil, nowS() + 1.5); kick();
 }
 /** Forget a press, a carry and a resize in flight: nothing is held, whatever the last events said. */
-function resetInput() {
+function resetInput(why) {
+  dg.resets += 1; dg.lastReset = why || 'main'; dlog('reset', why || 'main');
   ptr.down = false; ptr.pet = null; ptr.pick = null; ptr.st = null; ptr.fromPlate = false;
   if (carry) endCarry();
   if (sizing) { sizing = false; document.body.classList.remove('sizing'); if (pet) pet.resizeEnd(); }
   hover = null; needProbe = true; busyUntil = Math.max(busyUntil, nowS() + 0.5); kick();
+  if (pet) pet.setIgnore(sentIgnore); // the main process takes the page's word again, whatever it had
+}
+/** What the pointer can land on, in client px, for the main process (it decides without the page when the page does not: inputDiag.coverVerdict). Same shapes as pick() and domHit(). */
+function hitShapes() {
+  const circles = [], rects = [];
+  if (!collapsed && renderer) {
+    const W = innerWidth, H = innerHeight;
+    const circ = (o, r) => {
+      if (circles.length >= 40) return;
+      anchorOf(o, _p); _p.project(camera);
+      if (_p.z <= 1) circles.push([Math.round((_p.x * 0.5 + 0.5) * W), Math.round((-_p.y * 0.5 + 0.5) * H), Math.round(r)]);
+    };
+    files.forEach((f) => { if (!f.hidden) circ(f, 22); });
+    agents.forEach((a) => { if (a.chipObj && a.chip && a.chip.sp.visible) circ(a.chipObj, 22); });
+    agents.forEach((a) => { if (!a.gone) circ(a, crabRadius(a)); });
+  }
+  for (const id of ['plate', 'more', 'ask', 'reply', 'rbub']) {
+    const e = $(id);
+    if (!e || !e.getClientRects().length || rects.length >= 12) continue;
+    const r = e.getBoundingClientRect();
+    if (r.width > 0 && r.height > 0) rects.push([Math.round(r.left), Math.round(r.top), Math.round(r.width), Math.round(r.height)]);
+  }
+  return { circles, rects };
+}
+/** Hardening, cause unproven: after a display or power change (overlay/main.js, refreshPages) the canvas is made again at the window's size and the current pixel ratio, and a frame runs at once. */
+function refreshView(why) {
+  dlog('refresh', String(why).slice(0, 60));
+  if (renderer) renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+  resize(); needProbe = true; frame();
 }
 let lastOpen = { path: '', t: -9 };
 function fileClick(f, shift) {
@@ -2250,7 +2329,7 @@ function showMore(a) {
   hover = null; needProbe = true; kick();
 }
 if (overlay) {
-  window.addEventListener('mousemove', (e) => { ptr.mx = e.clientX; ptr.my = e.clientY; noteMove(); }, true);
+  window.addEventListener('mousemove', (e) => { dg.moves += 1; dg.lastMoveAt = Date.now(); ptr.mx = e.clientX; ptr.my = e.clientY; noteMove(); lateFrame(); }, true);
   document.documentElement.addEventListener('mouseleave', () => { if (carry || sizing) return; ptr.mx = -1; ptr.my = -1; hover = null; needProbe = true; kick(); });
   const grip = $('grip');
   if (grip && pet) {
@@ -2270,10 +2349,14 @@ if (overlay) {
   }
   // Another app can come to the front between a press and its release (a file was just opened): the release never arrives.
   // Whatever the page believes about the pointer is dropped on the events that say the window lost it.
-  window.addEventListener('blur', () => resetInput());
-  window.addEventListener('focus', () => resetInput());
-  window.addEventListener('pointercancel', () => resetInput(), true);
-  document.addEventListener('visibilitychange', () => resetInput());
+  window.addEventListener('blur', () => resetInput('blur'));
+  window.addEventListener('focus', () => resetInput('focus'));
+  window.addEventListener('pointercancel', () => resetInput('pointercancel'), true);
+  document.addEventListener('visibilitychange', () => resetInput('visibility ' + document.visibilityState));
+  if (renderer) {
+    renderer.domElement.addEventListener('webglcontextlost', () => { dg.lostAt = Date.now(); dlog('gl-lost', 'webgl context lost'); });
+    renderer.domElement.addEventListener('webglcontextrestored', () => { dg.restoredAt = Date.now(); dlog('gl-restored', 'webgl context restored'); });
+  }
   window.addEventListener('pointerup', () => { if (carry) endCarry(); });
   if (pet) {
     pet.onMove(petMove);
@@ -2285,12 +2368,19 @@ if (overlay) {
       else if (ev.type === 'sent') showBubble('sent', '\u2709 sent', ACK_WAIT);
       else if (ev.type === 'wrote') noteWrote(ev);
       else if (ev.type === 'dismiss') { const n = nowS(); (Array.isArray(ev.ids) ? ev.ids : []).forEach((id, i) => { const a = agents.get(id); if (a && !a.bye) a.bye = n + i * 0.12; }); busyUntil = Math.max(busyUntil, n + 2.5 + (Array.isArray(ev.ids) ? ev.ids.length : 0) * 0.12); kick(); }
-      else if (ev.type === 'reset-input') resetInput();
+      else if (ev.type === 'reset-input') resetInput('from main');
+      else if (ev.type === 'refresh') refreshView(ev.why);
+      else if (ev.type === 'cover') { // the main process saw the cursor sit over content with click-through on, and opened the window: believe it, then look again
+        dlog('cover', `main opened the window for the cursor at ${ev.x},${ev.y}`);
+        ptr.mx = ev.x; ptr.my = ev.y; sentIgnore = false; overContent = true; hotUntil = nowS() + 1.5; noteMove(); lateFrame();
+      }
       else if (ev.type === 'reset') { autoFit = true; fitPending = true; busyUntil = Math.max(busyUntil, nowS() + 1); kick(); }
       else if (ev.type === 'ticker') document.body.classList.toggle('noticker', !ev.on);
-      else if (ev.type === 'collapse') { collapsed = !!ev.on; hideMore(); needProbe = true; busyUntil = Math.max(busyUntil, nowS() + 1); kick(); }
+      else if (ev.type === 'collapse') { dlog('collapse', ev.on ? 'on' : 'off'); collapsed = !!ev.on; hideMore(); needProbe = true; busyUntil = Math.max(busyUntil, nowS() + 1); kick(); }
       else if (ev.type === 'cursor') { // the main process watches the cursor too, in case forwarded moves do not arrive
+        dg.curEvents += 1; dg.lastCurAt = Date.now();
         if (ev.x >= 0) { ptr.mx = ev.x; ptr.my = ev.y; noteMove(); } else if (ptr.mx >= 0 && !carry && !sizing) { ptr.mx = -1; needProbe = true; kick(); }
+        lateFrame();
       }
     });
   }
@@ -2333,14 +2423,26 @@ function queueFrame() { rafQueued = true; requestAnimationFrame(frame); }
 // One bad frame is logged and skipped: an exception out of step() or render() used to end the loop for good (the page keeps its last picture).
 function frame() {
   rafQueued = false; lastFrameMs = performance.now();
+  if (overlay) { // input diagnostics (web/input-diag-core.js): when the loop last ran, and the longest gap
+    const wall = Date.now();
+    dg.frames += 1;
+    if (dg.lastFrameAt) {
+      const gap = wall - dg.lastFrameAt;
+      if (gap > dg.maxGap) dg.maxGap = gap;
+      if (gap > 2000) dlog('gap', `${gap} ms since the last frame`);
+    }
+    dg.lastFrameAt = wall;
+  }
   try { frameBody(); }
   catch (err) {
     if ((++frameErrs <= 3 || frameErrs % 200 === 0) && window.console) console.error('crew-graph frame #' + frameErrs, err);
+    if (overlay) { dg.errors += 1; if (dg.errors <= 5 || dg.errors % 100 === 0) dlog('frame-error', `#${dg.errors} ${err && err.message}`); }
     if (overlay) schedule(200); else queueFrame();
   }
 }
 function frameBody() {
   const now = nowS(), dt = Math.min(overlay ? 0.12 : 0.05, now - lastT); lastT = now;
+  if (overlay && CrewInputDiag.pressStuck({ down: ptr.down, now, lastActivity: lastInteract })) resetInput('press held with no move'); // a release that never came
   if (overlay && collapsed) { overlayStep(0.1, now); if (needProbe) probeHit(); schedule(400); return; } // title bar only: nothing to draw
   if (renderer) { step(dt); renderer.render(scene, camera); if (overlay) probeHit(); }
   // The pet paces itself: about 30 fps while something moves, 12 when idle (a timer, so an idle page does not wake 60 times a second).
@@ -2668,6 +2770,51 @@ window.__crewGrab = (w, h) => {
   for (let i = 0; i < out.length; i += 0x8000) bin += String.fromCharCode.apply(null, out.subarray(i, i + 0x8000));
   return btoa(bin);
 };
+
+/* ---------------------------------------------------------------- input diagnostics, for overlay/main.js (it writes the file) */
+if (overlay) {
+  window.__crewInputDiag = () => new Promise((resolve) => {
+    const t0 = Date.now(), gl = renderer ? renderer.getContext() : null;
+    const info = () => ({
+      at: Date.now(), perfNow: Math.round(performance.now()),
+      visibility: document.visibilityState, hasFocus: document.hasFocus(),
+      collapsed, overContent, sentIgnore, missN, needProbe, hotUntilIn: Math.round((hotUntil - nowS()) * 1000), busyUntilIn: Math.round((busyUntil - nowS()) * 1000),
+      ptr: { down: ptr.down, btn: ptr.btn, moved: Math.round(ptr.moved), mx: Math.round(ptr.mx), my: Math.round(ptr.my), fromPlate: ptr.fromPlate, hasPick: !!ptr.pick, hasPet: !!ptr.pet },
+      carry: !!carry, sizing, asking: !!askIsOpen, hover: !!hover,
+      frameTimerSet: !!frameTimer, dozing,
+      frames: dg.frames, ageOfLastFrameMs: dg.lastFrameAt ? Date.now() - dg.lastFrameAt : -1, maxFrameGapMs: dg.maxGap, frameErrors: dg.errors,
+      mouseMoves: dg.moves, ageOfLastMouseMoveMs: dg.lastMoveAt ? Date.now() - dg.lastMoveAt : -1,
+      frameRestarts: dg.restarts, frameRunsByInput: dg.lateRuns, framesWithoutRaf: dg.rafLate,
+      cursorEventsFromMain: dg.curEvents, ageOfLastCursorEventMs: dg.lastCurAt ? Date.now() - dg.lastCurAt : -1,
+      downs: dg.downs, ups: dg.ups, ageOfLastDownMs: dg.lastDownAt ? Date.now() - dg.lastDownAt : -1, ageOfLastUpMs: dg.lastUpAt ? Date.now() - dg.lastUpAt : -1,
+      probes: dg.probes, lastProbe: dg.probe ? { how: dg.probe.how, x: dg.probe.x, y: dg.probe.y, alpha: dg.probe.a, ageMs: Date.now() - dg.probe.t } : null,
+      ignoreRequests: dg.ignoreSent, ageOfLastIgnoreRequestMs: dg.lastIgnoreAt ? Date.now() - dg.lastIgnoreAt : -1,
+      inputResets: dg.resets, lastReset: dg.lastReset,
+      gl: gl ? { lost: gl.isContextLost(), lostAgeMs: dg.lostAt ? Date.now() - dg.lostAt : -1, restoredAgeMs: dg.restoredAt ? Date.now() - dg.restoredAt : -1, buffer: gl.drawingBufferWidth + 'x' + gl.drawingBufferHeight, canvas: renderer.domElement.width + 'x' + renderer.domElement.height, pixelRatio: renderer.getPixelRatio() } : null,
+      window: { inner: innerWidth + 'x' + innerHeight, dpr: window.devicePixelRatio, screenX: window.screenX, screenY: window.screenY },
+      ring: dring ? dring.list() : [],
+    });
+    // Does a frame still get painted? A requestAnimationFrame asked for now answers within a frame or two, or (after 250 ms) rafAnswerMs is -1.
+    let done = false;
+    requestAnimationFrame(() => { if (done) return; done = true; const r = info(); r.rafAnswerMs = Date.now() - t0; resolve(r); });
+    setTimeout(() => { if (done) return; done = true; const r = info(); r.rafAnswerMs = -1; resolve(r); }, 250);
+  });
+}
+
+/* The main process asks this every few seconds (overlay/main.js, pulseWindow): its own timers and frames cannot be trusted to report a stall. */
+if (overlay) {
+  window.__crewPulse = () => ({
+    frameAgeMs: dg.lastFrameAt ? Date.now() - dg.lastFrameAt : -1, frames: dg.frames, upMs: Math.round(performance.now()),
+    sentIgnore, mouseAgeMs: dg.lastMoveAt ? Date.now() - dg.lastMoveAt : -1, visibility: document.visibilityState, collapsed,
+    dpr: window.devicePixelRatio, glLost: renderer ? renderer.getContext().isContextLost() : null,
+    hits: hitShapes(),
+  });
+  window.__crewRestart = (why) => {
+    dg.restarts += 1; dlog('restart', 'frame loop restarted: ' + String(why).slice(0, 100));
+    if (frameTimer) { clearTimeout(frameTimer); frameTimer = 0; }
+    needProbe = true; frame();
+  };
+}
 
 /* ---------------------------------------------------------------- test hooks (?hooks): for the scripts that drive the page */
 if (params.has('hooks')) {

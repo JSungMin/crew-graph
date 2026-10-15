@@ -87,6 +87,7 @@ const WEB_FILES = [
   'tasks.js',
   'view-core.js',
   'pet-settings-core.js',
+  'input-diag-core.js',
   'settings.html',
   'settings.js',
 ]

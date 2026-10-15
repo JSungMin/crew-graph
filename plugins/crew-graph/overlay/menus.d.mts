@@ -45,6 +45,7 @@ export function trayItems(
     onTop: (v: boolean) => void
     ticker: (v: boolean) => void
     reset: () => void
+    saveDiag?: () => void
     quit: () => void
   },
 ): MenuItem[]

@@ -16,18 +16,22 @@
 //   <state>/overlay-state.json   { alwaysOnTop, ticker, sessions: { <id>: bounds } }
 //   <state>/pet-settings.json     the pet's settings (web/pet-settings-core.js): characters, what is shown, motion, window. This
 //                                 process reads, validates and writes it (never ~/.claude/settings.json) and tells every window.
+//   <state>/pet-input-<time>-<id>.log  what a window's click-through and pointer did, written when a window is folded to its title bar and
+//                                 from the tray ("Save input diagnostics"); the newest five are kept (web/input-diag-core.js)
+//   <state>/dump-input            (a file, any content) write that log now; the file is removed once it is read
 //   <state>/quit                  quit everything (launch.mjs --quit)
 //   <state>/close-<id>            close that session's window (launch.mjs --close <id>)
 //   <state>/pet-inbox-<id>.json   requests for that session's mod: "show this in the Crew pane", and (with the session id and the token the
 //                                 mod gave this window) ask Claude, dismiss agents, ask Claude to stop one. One message at a time, at
 //                                 least INBOX_GAP_MS apart, so the mod's poll sees each.
-const { app, BrowserWindow, Tray, Menu, nativeImage, screen, ipcMain, shell, clipboard } = require('electron')
+const { app, BrowserWindow, Tray, Menu, nativeImage, screen, ipcMain, shell, clipboard, powerMonitor } = require('electron')
 const fs = require('node:fs')
 const os = require('node:os')
 const path = require('node:path')
 const { execFile } = require('node:child_process')
 const { pathToFileURL } = require('node:url')
 const petCore = require('../web/pet-settings-core.js')
+const inputDiag = require('../web/input-diag-core.js')
 
 const parseArgs = argv => {
   const arg = (name, fallback = '') => {
@@ -52,6 +56,16 @@ const settingsFile = path.join(stateDir, 'pet-settings.json')
 const settingsPage = path.join(path.dirname(pageFile), 'settings.html')
 const quitFile = path.join(stateDir, 'quit')
 const isScratch = !!shotOut || !!shotSettings || selftest // no single-instance lock, no saved state
+// Hardening, cause unproven (docs/guide.md, Desktop pet): the pet's click-through is decided by a frame loop in its page, and Chromium can
+// slow the animation frames and timers of a window it counts as covered or long hidden. These ask it to treat the window as in front.
+// They are read when the app starts, so they stand here and not in start().
+const CHROMIUM_SWITCHES = [
+  ['disable-features', 'CalculateNativeWinOcclusion,IntensiveWakeUpThrottling'],
+  ['disable-renderer-backgrounding'],
+  ['disable-background-timer-throttling'],
+  ['disable-backgrounding-occluded-windows'],
+]
+for (const [name, value] of CHROMIUM_SWITCHES) app.commandLine.appendSwitch(name, value)
 // Debug aid: CREW_PET_LOG=<file> logs what the page asks for.
 const dbg = process.env.CREW_PET_LOG
   ? msg => {
@@ -88,7 +102,7 @@ const okToken = t => typeof t === 'string' && /^[A-Za-z0-9]{16,64}$/.test(t)
 const ASK_MAX = 4000
 const INBOX_GAP_MS = 1300
 
-/** id -> window record: { id, win, token, ignoring, asking, gesture, orca, snap, cursor, cursorTimer, actions, inboxQ, inboxAt, inboxTimer } */
+/** id -> window record: { id, win, token, ignoring, asking, gesture, orca, snap, cursor, cursorTimer, actions, inboxQ, inboxAt, inboxTimer, ring, st } */
 const wins = new Map()
 const byContents = new Map()
 let tray = null
@@ -210,17 +224,308 @@ const isFile = p => {
   }
 }
 
+// ---------------------------------------------------------------- input diagnostics
+
+const PAGE_WAIT_MS = 350 // how long a dump waits for the page; a page that does not answer is itself a finding
+const dumpGate = inputDiag.makeDumpGate()
+
+const newStats = () => ({ ignoreCalls: 0, pageIgnores: 0, pageIgnoreAt: 0, cursorTicks: 0, cursorSent: 0, cursorSentAt: 0, cursorInsideAt: 0, cursorMovedInsideAt: 0, hits: null, coverSince: 0, coverForced: false, covers: 0, pulses: 0, pulseAt: 0, pulse: null, mismatch: false, restartAt: 0, restarts: 0, renewAt: 0, renews: 0 })
+const agoMs = at => (at ? Date.now() - at : -1)
+
+/** What the OS and Chromium say happened to a window and its page: each goes in the window's ring. */
+function watchWindow(w) {
+  const win = w.win
+  for (const ev of ['show', 'hide', 'minimize', 'restore', 'maximize', 'unmaximize', 'focus', 'blur', 'always-on-top-changed', 'unresponsive', 'responsive']) {
+    win.on(ev, () => note(w, 'window', ev))
+  }
+  const wc = win.webContents
+  wc.on('render-process-gone', (_e, d) => note(w, 'renderer', `gone: ${d && d.reason}`))
+  wc.on('unresponsive', () => note(w, 'renderer', 'unresponsive'))
+  wc.on('responsive', () => note(w, 'renderer', 'responsive'))
+  wc.on('console-message', (e, ...rest) => {
+    const level = e && e.level !== undefined ? e.level : rest[0]
+    if (level === 'error' || level === 3) note(w, 'page-error', String(e && e.message !== undefined ? e.message : rest[1]).slice(0, 150))
+  })
+}
+
+let refreshTimer = null
+/**
+ * After a display or power change every page is told to make its canvas again at the window's size and the current pixel ratio, and to
+ * run a frame. Hardening, cause unproven: nothing shows that a canvas goes stale this way, a long idle is where such a change is likely.
+ * One message, a moment after the last event.
+ */
+function refreshPages(why) {
+  clearTimeout(refreshTimer)
+  refreshTimer = setTimeout(() => {
+    for (const w of wins.values()) {
+      if (!alive(w)) continue
+      note(w, 'refresh', why)
+      sendTo(w, { type: 'refresh', why })
+    }
+  }, 700)
+}
+
+/** Displays, power and the GPU process: what concerns every window. */
+function watchSystem() {
+  screen.on('display-added', () => {
+    gnote('display', 'added')
+    refreshPages('display added')
+  })
+  screen.on('display-removed', () => {
+    gnote('display', 'removed')
+    refreshPages('display removed')
+  })
+  screen.on('display-metrics-changed', (_e, d, changed) => {
+    gnote('display', `metrics ${d && d.id} changed ${(changed || []).join(',')} scale ${d && d.scaleFactor} bounds ${d && JSON.stringify(d.bounds)}`)
+    refreshPages('display metrics changed')
+  })
+  for (const ev of ['suspend', 'resume', 'lock-screen', 'unlock-screen']) {
+    powerMonitor.on(ev, () => {
+      gnote('power', ev)
+      if (ev === 'resume' || ev === 'unlock-screen') refreshPages(ev)
+    })
+  }
+  app.on('child-process-gone', (_e, d) => gnote('process', `${d && d.type} gone: ${d && d.reason}`))
+}
+
+/** Everything the main process knows about one window's click-through, read at once. */
+function mainState(w) {
+  const win = w.win
+  const b = win.getBounds()
+  const d = screen.getDisplayMatching(b)
+  const c = screen.getCursorScreenPoint()
+  const st = w.st
+  return [
+    ['session', w.id || '(none)'],
+    ['bounds', b],
+    ['display', { id: d.id, scale: d.scaleFactor, bounds: d.bounds }],
+    ['cursor', { x: c.x, y: c.y, insideWindow: c.x >= b.x && c.y >= b.y && c.x < b.x + b.width && c.y < b.y + b.height }],
+    ['collapsed', !!w.collapsed],
+    ['asking', !!w.asking],
+    ['page wants click-through (main believes)', w.ignoring],
+    ['last setIgnoreMouseEvents', w.real ? { ignore: w.real.ignore, ageMs: agoMs(w.real.at), why: w.real.why } : null],
+    ['gesture', w.gesture ? { kind: w.gesture.kind, ageMs: Date.now() - w.gesture.started, ticks: w.gesture.ticks } : null],
+    ['visible / minimized / focused / focusable', [win.isVisible(), win.isMinimized(), win.isFocused(), win.isFocusable()].join(' / ')],
+    ['alwaysOnTop / opacity', `${win.isAlwaysOnTop()} / ${win.getOpacity()}`],
+    ['ignore calls (all / from the page)', `${st.ignoreCalls} / ${st.pageIgnores}`],
+    ["age of the page's last setIgnore, ms", agoMs(st.pageIgnoreAt)],
+    ['cursor backup: ticks / sent', `${st.cursorTicks} / ${st.cursorSent}`],
+    ['cursor backup: age of last send / of last tick with the cursor inside, ms', `${agoMs(st.cursorSentAt)} / ${agoMs(st.cursorInsideAt)}`],
+    ['pulse (every 3 s): answered / age of last answer ms / frame restarts / mouse-forwarding renewals', `${st.pulses} / ${agoMs(st.pulseAt)} / ${st.restarts} / ${st.renews}`],
+    ['cover (main opened the window, the cursor held over a reported shape with click-through on): times / shapes known (circles, rects)', `${st.covers} / ${st.hits ? `${st.hits.circles.length}, ${st.hits.rects.length}` : 'none'}`],
+    ['last pulse answer', st.pulse ? { ...st.pulse, hits: undefined } : null],
+  ]
+}
+
+/** The page's own view, or why there is none. Asked for at once: the answer is the state at the moment of the call. */
+function pageState(w) {
+  if (!alive(w)) return Promise.resolve({ error: 'window gone' })
+  const ask = w.win.webContents
+    .executeJavaScript('window.__crewInputDiag ? window.__crewInputDiag() : null', true)
+    .then(r => r || { error: 'the page has no diagnostics (an older page?)' }, e => ({ error: String((e && e.message) || e) }))
+  const late = new Promise(r => setTimeout(() => r({ error: `the page did not answer within ${PAGE_WAIT_MS} ms` }), PAGE_WAIT_MS))
+  return Promise.race([ask, late])
+}
+
+// What Windows says about the window (overlay/winprobe.mjs): its style bits, whether a window is above it, which window is at a point.
+// OPT-IN, because it runs PowerShell with -ExecutionPolicy Bypass: only for the tray item "Save input diagnostics", or for every dump when
+// CREW_PET_WINPROBE=1 is set. Nothing of it is loaded, written or compiled before then.
+const WINPROBE_ENV = process.env.CREW_PET_WINPROBE === '1'
+
+/** The script file, written when first needed. */
+function probeScriptFile(mod) {
+  const file = path.join(stateDir, `crewwin-${mod.sourceHash()}.ps1`)
+  if (!isFile(file)) {
+    fs.mkdirSync(stateDir, { recursive: true })
+    fs.writeFileSync(file, mod.scriptText())
+  }
+  return file
+}
+
+/** Ask Windows about one window: resolves to text, never rejects. */
+async function nativeProbe(w) {
+  if (process.platform !== 'win32') return '(only on Windows)'
+  try {
+    const mod = await import(pathToFileURL(path.join(__dirname, 'winprobe.mjs')).href)
+    const script = probeScriptFile(mod)
+    const h = w.win.getNativeWindowHandle()
+    const hwnd = Number(h.length >= 8 ? h.readBigUInt64LE(0) : h.readUInt32LE(0))
+    const b = w.win.getBounds()
+    const spots = [{ x: b.x + b.width / 2, y: b.y + b.height / 2 }, screen.getCursorScreenPoint()]
+    const phys = p => screen.dipToScreenPoint({ x: Math.round(p.x), y: Math.round(p.y) })
+    const tl = phys({ x: b.x, y: b.y })
+    const br = phys({ x: b.x + b.width, y: b.y + b.height })
+    const started = Date.now()
+    const { file, args } = mod.probeArgs(script, hwnd, spots.map(phys), { left: tl.x, top: tl.y, right: br.x, bottom: br.y })
+    return await new Promise(resolve => {
+      execFile(file, args, { windowsHide: true, timeout: 30000 }, (err, out) => resolve(err ? `failed: ${err.message}` : `(read ${Date.now() - started} ms after the dump began)\n${String(out).trim()}`))
+    })
+  } catch (e) {
+    return `failed: ${(e && e.message) || e}`
+  }
+}
+
+// ---------------------------------------------------------------- the pulse
+
+/** Make the real click-through what the page last asked for, as far as a gesture allows. A disagreement is repaired and shows in the ring. */
+function reconcileIgnore(w, why) {
+  if (!alive(w)) return
+  const fix = inputDiag.ignoreFix({ pageWants: w.ignoring, gesture: !!w.gesture, realIgnore: w.real ? w.real.ignore : null })
+  if (fix.apply) applyIgnore(w, fix.effective, `reconcile (${why})`)
+}
+
+/** Set the forwarding of mouse moves to the page up again (off, then on), in case what carries them stopped. Only while the window is click-through. */
+function renewHook(w, why) {
+  if (!alive(w) || w.gesture || !w.ignoring) return
+  w.st.renewAt = Date.now()
+  w.st.renews += 1
+  w.win.setIgnoreMouseEvents(false)
+  applyIgnore(w, true, `renew forwarding (${why})`)
+}
+
+/** The cursor has sat over drawn content with click-through on and the page has not opened the window: do it, and tell the page. */
+function takeClicks(w, x, y) {
+  w.st.covers += 1
+  note(w, 'cover', `cursor at ${x},${y} held over a shape for ${inputDiag.COVER_HOLD_MS} ms with click-through on: taking clicks`)
+  setIgnore(w, false, 'main: the cursor is over content')
+  sendTo(w, { type: 'cover', x, y })
+}
+
+const within = (p, ms) => Promise.race([p, new Promise(r => setTimeout(() => r(null), ms))])
+
+/**
+ * Ask the page how it is doing and act on the answer (inputDiag.pulseVerdict decides): restart a frame loop that stopped, take the page's
+ * word on click-through where the two sides disagree, set the mouse forwarding up again when the page gets no moves while the cursor does
+ * move over it. The request comes from here, so a page whose own timers and frames are held back still gets it.
+ * Hardening, cause unproven: nothing here has been seen to fix a dead pet; the diagnostics file says which of it ever fires.
+ */
+async function pulseWindow(w) {
+  if (!alive(w) || w.pulsing || w.folding) return
+  w.pulsing = true
+  try {
+    const p = await within(w.win.webContents.executeJavaScript('window.__crewPulse ? window.__crewPulse() : null', true).catch(() => null), inputDiag.PULSE_WAIT_MS)
+    if (!alive(w)) return
+    const st = w.st
+    const now = Date.now()
+    if (p) {
+      st.pulses += 1
+      st.pulseAt = now
+      st.pulse = p
+      if (p.hits && Array.isArray(p.hits.circles) && Array.isArray(p.hits.rects)) st.hits = p.hits
+    }
+    const todo = inputDiag.pulseVerdict(p, { now, ignoring: w.ignoring, gesture: !!w.gesture, lastRestartAt: st.restartAt, lastRenewAt: st.renewAt, cursorMovedInsideAt: st.cursorMovedInsideAt, mismatchBefore: st.mismatch })
+    st.mismatch = !!p && typeof p.sentIgnore === 'boolean' && p.sentIgnore !== w.ignoring && !w.gesture
+    for (const t of todo) {
+      if (t.do !== 'note' || st.lastNote !== t.why) note(w, 'pulse', `${t.do}: ${t.why}`)
+      if (t.do === 'note') st.lastNote = t.why
+      else if (t.do === 'restart-frame') {
+        st.restartAt = now
+        st.restarts += 1
+        w.win.webContents.executeJavaScript(`window.__crewRestart && window.__crewRestart(${JSON.stringify(t.why)})`, true).catch(() => {})
+      } else if (t.do === 'adopt-ignore') setIgnore(w, t.value, 'pulse: the page differs')
+      else if (t.do === 'renew-hook') renewHook(w, t.why)
+    }
+    if (p) st.lastNote = ''
+    reconcileIgnore(w, 'pulse')
+  } finally {
+    w.pulsing = false
+  }
+}
+
+/**
+ * Write the diagnostics file: every window's main-process state and page state and both rings, then the shared ring. The main-process
+ * state is read before the first await, and the pages are asked in the same turn, so a caller that resets things once this resolves
+ * (folding a window) has not changed what is written. Returns the file, or '' when an automatic dump was skipped or nothing was written.
+ */
+async function dumpInput(why, trigger, manual) {
+  const now = Date.now()
+  const key = trigger ? trigger.id : '*'
+  if (!dumpGate.allow(key, now, manual)) {
+    gnote('dump', `skipped (${why}): one was written for this window a moment ago`)
+    return ''
+  }
+  const list = [...wins.values()].filter(alive)
+  const mains = list.map(w => ({ w, rows: mainState(w), ring: w.ring.list() }))
+  const pending = list.map(pageState)
+  const wantNative = why === 'tray' || WINPROBE_ENV // opt-in (see nativeProbe)
+  const natives = wantNative ? list.map(nativeProbe) : [] // started now: what it reads should be the state before a fold
+  gnote('dump', `${manual ? 'asked for' : 'automatic'}: ${why}`)
+  const pages = await Promise.all(pending)
+  const blocks = [
+    {
+      title: 'pet',
+      rows: [
+        ['why', `${why}${manual ? ' (asked for)' : ''}`],
+        ['trigger window', trigger ? trigger.id || '(none)' : '(all)'],
+        ['crew-pet process up ms', now - startedAt],
+        ['electron / chrome', `${process.versions.electron} / ${process.versions.chrome}`],
+        ['platform', `${process.platform} ${os.release()}`],
+        ['displays', screen.getAllDisplays().map(d => ({ id: d.id, scale: d.scaleFactor, bounds: d.bounds, workArea: d.workArea }))],
+        ['onTop / ticker / windows', `${onTop} / ${ticker} / ${list.length}`],
+        ['windows probe', wantNative ? 'asked for' : 'off (the tray item "Save input diagnostics" turns it on for that dump; so does CREW_PET_WINPROBE=1)'],
+        ['chromium switches', CHROMIUM_SWITCHES.map(s => s.join('=')).join(' ')],
+      ],
+    },
+  ]
+  const rings = []
+  mains.forEach(({ w, rows, ring }, i) => {
+    const tag = (w.id || 'none').slice(0, 8)
+    const { ring: pageRing, ...rest } = pages[i] || {}
+    blocks.push({ title: `window ${tag}: main process`, rows })
+    blocks.push({ title: `window ${tag}: page`, rows: Object.entries(rest) })
+    rings.push({ title: `window ${tag}: main process ring`, entries: ring })
+    rings.push({ title: `window ${tag}: page ring`, entries: Array.isArray(pageRing) ? pageRing : [] })
+  })
+  rings.push({ title: 'all windows: displays, power, processes', entries: gring.list() })
+  const file = path.join(stateDir, inputDiag.dumpName(now, trigger && trigger.id))
+  try {
+    fs.mkdirSync(stateDir, { recursive: true })
+    fs.writeFileSync(file, inputDiag.render(now, blocks, rings))
+    for (const n of inputDiag.pruneNames(fs.readdirSync(stateDir), inputDiag.DUMP_KEEP)) fs.rmSync(path.join(stateDir, n), { force: true })
+  } catch (e) {
+    dbg(`input diagnostics not written ${e && e.message}`)
+    return ''
+  }
+  dbg(`input diagnostics written ${file}`)
+  // Windows' own view of each window: a second or two (PowerShell starts), so a fold does not wait for it; it is added to the file when it arrives.
+  if (natives.length) void Promise.all(natives).then(texts => {
+    try {
+      fs.appendFileSync(file, list.map((w, i) => `\n## window ${(w.id || 'none').slice(0, 8)}: what Windows says\n${texts[i]}\n`).join(''))
+    } catch (e) {
+      dbg(`input diagnostics: native part not written ${e && e.message}`)
+    }
+  })
+  return file
+}
+
 // ---------------------------------------------------------------- windows
 
 const alive = w => !!w && !w.win.isDestroyed()
 
-function setIgnore(w, v) {
+// What happened to the windows' click-through and pointer state, for the diagnostics file (web/input-diag-core.js): one ring per window,
+// one for what concerns all of them (displays, power).
+const gring = inputDiag.makeRing(inputDiag.RING_CAP)
+const gnote = (kind, text) => gring.add(kind, text)
+const note = (w, kind, text) => {
+  if (w && w.ring) w.ring.add(kind, text)
+}
+const startedAt = Date.now()
+
+function setIgnore(w, v, why = 'page') {
   w.ignoring = v
   if (!alive(w)) return
   // Never click-through while a drag or a resize runs.
   const effective = v && !w.gesture
+  applyIgnore(w, effective, `${why} wants ${v}${w.gesture ? ' (gesture)' : ''}`)
+}
+
+/** The one place the window's real click-through is changed: what was asked of Electron, and why, is kept for the diagnostics. */
+function applyIgnore(w, effective, why) {
   w.win.setIgnoreMouseEvents(effective, effective ? { forward: true } : undefined)
-  dbg(`ignore ${effective}${w.gesture ? ' (gesture)' : ''}`)
+  w.real = { ignore: effective, at: Date.now(), why }
+  w.st.ignoreCalls += 1
+  note(w, 'ignore', `setIgnoreMouseEvents(${effective}${effective ? ', {forward:true}' : ''}) <- ${why}`)
+  dbg(`ignore ${effective} (${why})`)
 }
 
 const sendTo = (w, ev) => {
@@ -386,9 +691,30 @@ function settingsContext() {
   }
 }
 
-/** Fold the window down to its title bar (the pill), or open it up to the size it had. */
+/**
+ * Fold the window down to its title bar (the pill), or open it up to the size it had. A fold first writes the input diagnostics
+ * (dumpInput reads both sides before it resolves): folding is what a window that stopped taking clicks gets cured by, and it resets
+ * the state that would say why.
+ */
 function setCollapsed(w, v) {
   if (!alive(w) || !!w.collapsed === !!v) return
+  if (v) {
+    if (w.folding) return
+    w.folding = true
+    dumpInput('fold', w, false)
+      .catch(e => dbg(`input diagnostics failed ${e && e.message}`))
+      .then(() => {
+        w.folding = false
+        applyCollapsed(w, true)
+      })
+    return
+  }
+  applyCollapsed(w, v)
+}
+
+function applyCollapsed(w, v) {
+  if (!alive(w) || !!w.collapsed === !!v) return
+  note(w, 'collapse', v ? 'fold' : 'expand')
   const b = w.win.getBounds()
   stopGesture(w)
   if (v) {
@@ -423,6 +749,7 @@ function closeWindow(id) {
   wins.delete(id)
   stopGesture(w, true)
   clearInterval(w.cursorTimer)
+  clearInterval(w.pulseTimer)
   clearInterval(w.raiseTimer)
   clearTimeout(w.inboxTimer)
   if (alive(w)) {
@@ -487,6 +814,7 @@ function trayItems() {
       onTop: setOnTop,
       ticker: setTicker,
       reset: () => wins.forEach(resetBounds),
+      saveDiag: () => void dumpInput('tray', null, true).catch(e => dbg(`input diagnostics failed ${e && e.message}`)),
       quit,
     },
   )
@@ -513,7 +841,7 @@ async function createWindow(id, orca, token) {
     show: false,
     webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true, nodeIntegration: false, sandbox: true, backgroundThrottling: false },
   })
-  const w = { id, win, token: okToken(token) ? token : '', ignoring: true, asking: false, gesture: null, collapsed: false, full: bounds, orca, snap: { mtime: -1, snap: null, files: new Map() }, cursor: '', cursorTimer: null, actions: null, inboxQ: [], inboxAt: 0, inboxTimer: null }
+  const w = { id, win, token: okToken(token) ? token : '', ignoring: true, asking: false, gesture: null, collapsed: false, full: bounds, orca, snap: { mtime: -1, snap: null, files: new Map() }, cursor: '', cursorTimer: null, actions: null, inboxQ: [], inboxAt: 0, inboxTimer: null, ring: inputDiag.makeRing(inputDiag.RING_CAP), real: null, st: newStats() }
   w.actions = actionsMod.makeActions({
     shell,
     execFile,
@@ -534,7 +862,8 @@ async function createWindow(id, orca, token) {
   win.setBounds(shown)
   win.setAlwaysOnTop(onTop, onTop ? 'floating' : 'normal')
   win.setOpacity(settings.opacity / 100)
-  win.setIgnoreMouseEvents(true, { forward: true })
+  applyIgnore(w, true, 'window created')
+  watchWindow(w)
   win.removeMenu()
   // With CREW_PET_LOG set, what the page writes to its console lands in the log too.
   if (process.env.CREW_PET_LOG) win.webContents.on('console-message', (e, ...rest) => dbg(`page ${e && e.message !== undefined ? e.message : rest[1]}`))
@@ -551,9 +880,13 @@ async function createWindow(id, orca, token) {
   win.showInactive()
   win.on('moved', saveState)
   win.on('resized', saveState)
-  win.on('show', () => sendTo(w, { type: 'reset-input' }))
+  win.on('show', () => {
+    sendTo(w, { type: 'reset-input' })
+    reconcileIgnore(w, 'shown')
+  })
   win.on('restore', () => {
     sendTo(w, { type: 'reset-input' })
+    reconcileIgnore(w, 'restored')
     raise(w)
   })
   // The page asks for forwarded mouse moves while it lets clicks through. This is a second source for the
@@ -561,20 +894,32 @@ async function createWindow(id, orca, token) {
   if (!isScratch) {
     w.cursorTimer = setInterval(() => {
       if (!alive(w) || w.gesture || !w.win.isVisible()) return
+      w.st.cursorTicks += 1
       const c = screen.getCursorScreenPoint()
       const b = w.win.getBounds()
       const x = c.x - b.x
       const y = c.y - b.y
       const inside = x >= 0 && y >= 0 && x < b.width && y < b.height
       const key = inside ? `${x},${y}` : 'out'
+      if (inside) w.st.cursorInsideAt = Date.now()
+      // The cursor held over content while click-through is on: if the page has not opened the window, the main process does (inputDiag.coverVerdict).
+      const cv = inputDiag.coverVerdict({ x: inside ? x : null, y, hits: w.st.hits, ignoring: w.ignoring, gesture: !!w.gesture, since: w.st.coverSince, forced: w.st.coverForced, now: Date.now() })
+      w.st.coverSince = cv.since
+      w.st.coverForced = cv.forced
+      if (cv.force) takeClicks(w, x, y)
       if (key === w.cursor) return
+      if (inside) w.st.cursorMovedInsideAt = Date.now()
+      if ((key === 'out') !== (w.cursor === 'out')) note(w, 'cursor', inside ? `entered at ${x},${y}` : 'left')
       w.cursor = key
       // While the window takes clicks the page sees its own moves; only the cursor leaving needs telling (a window that was
       // covered gets no leave event of its own, and would keep taking clicks over its whole rectangle).
       if (!w.ignoring && inside) return
+      w.st.cursorSent += 1
+      w.st.cursorSentAt = Date.now()
       sendTo(w, { type: 'cursor', x: inside ? x : -1, y: inside ? y : -1 })
     }, 125)
   }
+  if (!isScratch || process.env.CREW_PET_PULSE) w.pulseTimer = setInterval(() => void pulseWindow(w), inputDiag.PULSE_EVERY_MS)
   dbg(`started window ${id || '(none)'} bounds ${JSON.stringify(win.getBounds())}`)
   refreshTray()
   return w
@@ -657,7 +1002,7 @@ function setAsking(w, on) {
       w.win.show()
       w.win.focus()
     }
-  } else setIgnore(w, w.ignoring)
+  } else setIgnore(w, w.ignoring, 'ask card closed')
   dbg(`asking ${on} focusable=${w.win.isFocusable()} focused=${w.win.isFocused()}`)
 }
 
@@ -763,13 +1108,14 @@ function menuFor(w, ctx) {
 const TICK_MS = 16
 
 function stopGesture(w, silent) {
-  if (!w.gesture) return
+  if (!w.gesture) return reconcileIgnore(w, 'no gesture to end') // an end the main process had already made itself (a timeout) still leaves the page's wish in force
   clearInterval(w.gesture.timer)
   const kind = w.gesture.kind
+  note(w, 'gesture', `${kind} ended after ${Date.now() - w.gesture.started} ms, ${w.gesture.ticks} ticks${silent ? ' (silent)' : ''}`)
   w.gesture = null
   if (alive(w)) {
     w.win.webContents.send('pet:move', { vx: 0, vy: 0 })
-    if (!silent) setIgnore(w, w.ignoring) // back to what the page last wanted
+    setIgnore(w, w.ignoring, `gesture ${kind} end`) // back to what the page last wanted, however the gesture ended
     dbg(`gesture ${kind} ended, bounds ${JSON.stringify(w.win.getBounds())}`)
   }
   if (!silent) saveState()
@@ -784,12 +1130,15 @@ function startGesture(w, kind, pullX = 0, pullY = 0) {
   const b = w.win.getBounds()
   const g = { kind, cur, b, last: { x: b.x, y: b.y }, at: Date.now(), started: Date.now(), vx: 0, vy: 0, timer: null, ticks: 0 }
   w.gesture = g
-  w.win.setIgnoreMouseEvents(false)
+  applyIgnore(w, false, `gesture ${kind} start`)
   const max = maxSize(w)
   g.timer = setInterval(() => {
     if (!alive(w)) return stopGesture(w)
     // A gesture the page never ended (a lost mouse-up) must not hold the window forever.
-    if (Date.now() - g.started > 60000) return stopGesture(w)
+    if (Date.now() - g.started > 60000) {
+      note(w, 'gesture', 'timed out after 60 s (the page never ended it)')
+      return stopGesture(w)
+    }
     const c = screen.getCursorScreenPoint()
     g.ticks += 1
     if (kind === 'drag') {
@@ -811,6 +1160,7 @@ function startGesture(w, kind, pullX = 0, pullY = 0) {
       if (g.ticks === 1 || g.ticks % 30 === 0) dbg(`resize tick ${g.ticks} want ${width}x${height} got ${JSON.stringify(w.win.getBounds())}`)
     }
   }, TICK_MS)
+  note(w, 'gesture', `${kind} started, bounds ${JSON.stringify(b)}`)
   dbg(`gesture ${kind} started at ${JSON.stringify(cur)}, bounds ${JSON.stringify(b)}`)
 }
 
@@ -853,7 +1203,11 @@ function wireIpc() {
     dbg(`resizeBy requested ${f}`)
     resizeBy(w, Number(f))
   })
-  on('pet:setIgnore', (w, v) => setIgnore(w, !!v))
+  on('pet:setIgnore', (w, v) => {
+    w.st.pageIgnoreAt = Date.now()
+    w.st.pageIgnores += 1
+    setIgnore(w, !!v, 'page')
+  })
   on('pet:collapse', (w, v) => setCollapsed(w, !!v))
   // The ask card: the page opens it on a menu's request and says when it takes and gives up the keyboard; Send / Put in prompt box arrive here.
   on('pet:askFocus', (w, v) => setAsking(w, !!v))
@@ -929,6 +1283,7 @@ async function start() {
   summaryMod = await import(pathToFileURL(path.join(__dirname, 'summary.mjs')).href)
   menusMod = await import(pathToFileURL(path.join(__dirname, 'menus.mjs')).href)
   await app.whenReady()
+  watchSystem()
   const st = isScratch ? {} : loadState()
   // The settings file wins; without one, the two settings older versions kept in overlay-state.json carry over.
   let fromFile = null
@@ -987,6 +1342,10 @@ async function start() {
     if (names.includes('quit')) {
       fs.rmSync(quitFile, { force: true })
       return quit()
+    }
+    if (names.includes('dump-input')) {
+      fs.rmSync(path.join(stateDir, 'dump-input'), { force: true })
+      void dumpInput('request file', null, true).catch(e => dbg(`input diagnostics failed ${e && e.message}`))
     }
     for (const f of names) {
       const m = /^close-(.+)$/.exec(f)

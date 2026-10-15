@@ -124,6 +124,8 @@ export function trayItems(st, act) {
     { label: 'Always on top', type: 'checkbox', checked: st.onTop, click: i => act.onTop(i.checked) },
     { label: 'Activity ticker', type: 'checkbox', checked: st.ticker, click: i => act.ticker(i.checked) },
     { label: 'Reset position & size', click: act.reset },
+    // What the pet's click-through did lately, written to a file (see docs/guide.md, Desktop pet).
+    ...(act.saveDiag ? [{ label: 'Save input diagnostics', click: act.saveDiag }] : []),
     { type: 'separator' },
     { label: 'Quit', click: act.quit },
   ]
