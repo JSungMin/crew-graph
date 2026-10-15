@@ -2618,7 +2618,7 @@ function demoTick() {
   const t = nowS() - demo.t0;
   if (demoLineup) { if (!demo.lineInit) { demo.lineInit = true; demoLineupInit(); } }
   else if (demoBusy) { if (!demo.busyInit) { demo.busyInit = true; demoBusyInit(); } if (Math.random() < 0.7) demoBusyEvent(); }
-  else { const script = demoTasks && DK ? DK.script : SCRIPT; while (demo.step < script.length && script[demo.step][0] <= t) { const i = demo.step++; script[i][1](); } }
+  else { const script = demoTasks && DK ? DK.script : SCRIPT; while (demo.step < script.length && script[demo.step][0] <= t) { const i = demo.step++; script[i][1](); if (demo.step <= i) break; } } // a step that restarts the demo (demoReset) sets step back to 0: stop here, the next tick plays the script from the new t0 (it used to replay it at once, reach the reset again and never return)
   const now = Date.now(), se = demo.se;
   demo.ag.forEach((a) => { if (a.status === 'running') { a.steps += Math.random() < 0.35 ? 1 : 0; a.calls += Math.random() < 0.4 ? 1 : 0; a.ctxTokens += Math.round(Math.random() * 600); a.outTokens += Math.round(Math.random() * 90); } });
   if (se.turn.running) { se.ctx.used += Math.round(300 + Math.random() * 700); se.costUsd += 0.0015 + Math.random() * 0.002; se.requests += Math.random() < 0.3 ? 1 : 0; }
@@ -2651,7 +2651,7 @@ window.__crewGrab = (w, h) => {
 /* ---------------------------------------------------------------- test hooks (?hooks): for the scripts that drive the page */
 if (params.has('hooks')) {
   window.__crewTest = {
-    agents, files, CHARS, camera, cam, shake, THREE: T, rfx, makeCrab, updateCrab, scene, get tasks() { return TK; }, demoT: () => nowS() - demo.t0,
+    agents, files, CHARS, camera, cam, shake, THREE: T, renderer, rfx, makeCrab, updateCrab, scene, get tasks() { return TK; }, demoT: () => nowS() - demo.t0,
     anchorOf, noteCarryVelocity, petMove, openAsk, closeAsk, noteReply, showBubble, askOpen: () => askIsOpen,
     dismissAgents: (ids) => { const n = nowS(); ids.forEach((id, i) => { const a = agents.get(id); if (a && !a.bye) a.bye = n + i * 0.12; }); busyUntil = n + 4; kick(); }, pinchCrab, keepPet, setRules: (spec) => { charRules = CC.parseRules(spec); reskinAll(); },
     ids: () => charIds.slice(), settings: () => PS, pack: (id) => { const a = agents.get(id); return a ? packInfo(a) : null; }, problemsOf, picks: () => [...agents.values()].map((a) => [a.id, a.chId, a.pick && a.pick.how, a.pick && a.pick.mode, typeKeyOf(a)]),

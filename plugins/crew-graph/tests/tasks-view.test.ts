@@ -30,6 +30,11 @@ type View = {
   FOODS: Record<string, { crumb: string; boxes: { size: number[]; at: number[]; color: string }[] }>
   BUILTIN_FOOD: Record<string, string>
   MOTION_OF: Record<string, string>
+  EAT: { grab: number; chomp: number; chomps: number; total: number; gap: number; pop: number; last: number; minPx: number }
+  eatSlot(free: number | undefined, now: number, dur: number): { at: number; free: number }
+  boostFor(hm: number, base: number, pxw: number, minPx: number): number
+  foodHeight(boxes: { size: number[]; at: number[] }[]): number
+  eatSize(t: number): number
 }
 type Core = { normalizeDef(d: unknown): { def: null | { food?: { id?: string; boxes?: unknown[] } }; warnings: string[] }; FOOD_IDS: string[]; DEFAULT_FOOD: string }
 const view = (globalThis as unknown as { CrewTasks: View }).CrewTasks
@@ -183,4 +188,60 @@ test('a pack may name a built-in food or bring boxes; a bad food is ignored', ()
   expect(view.foodFor('mine', unknown.def, 'character').key).toBe('seed')
   const many = core.normalizeDef({ ...base, food: Array.from({ length: 90 }, () => bone.boxes[0]) })
   expect(many.def?.food?.boxes?.length).toBe(40)
+})
+
+// ---------------------------------------------------------------- the eat
+
+test('an eat takes about 2.3 s: grab and lift, three chomps, a swallow', () => {
+  const E = view.EAT
+  expect(E.total).toBeGreaterThanOrEqual(2)
+  expect(E.total).toBeLessThanOrEqual(2.5)
+  expect(E.grab + E.chomps * E.chomp).toBeLessThan(E.total) // some time is left for the swallow
+  expect(E.total - E.grab - E.chomps * E.chomp).toBeGreaterThan(0.3)
+})
+
+test('eats of one eater go one after another; another eater is not held up; a late request starts at once', () => {
+  const E = view.EAT, one = E.total + E.gap
+  let free: number | undefined
+  const starts: number[] = []
+  for (let i = 0; i < 4; i++) {
+    const s = view.eatSlot(free, 10, E.total) // four tasks finished in the same snapshot
+    starts.push(s.at)
+    free = s.free
+  }
+  expect(starts[0]).toBe(10)
+  starts.forEach((t, i) => expect(Math.abs((t) - (10 + i * one)) < 1e-6).toBe(true))
+  expect(starts[1]! - starts[0]!).toBeGreaterThan(E.total) // never two at the same time
+  expect(view.eatSlot(undefined, 10, E.total).at).toBe(10) // nobody else: at once
+  expect(view.eatSlot(free, 10 + 99, E.total).at).toBe(10 + 99) // the queue was empty long ago
+})
+
+test('the item grows to 1.5x on its way to the mouth, shrinks with each chomp but stays readable, and is gone after the swallow', () => {
+  const E = view.EAT
+  expect(view.eatSize(0)).toBe(1)
+  expect(Math.abs((view.eatSize(E.grab)) - (E.pop)) < 1e-6).toBe(true)
+  expect(Math.abs((E.pop) - (1.5)) < 1e-6).toBe(true)
+  let prev = 0
+  for (let t = 0; t <= E.grab; t += 0.01) { const v = view.eatSize(t); expect(v).toBeGreaterThanOrEqual(prev - 1e-9); prev = v } // only grows while it is lifted
+  prev = 9
+  for (let t = E.grab; t <= E.total; t += 0.01) { const v = view.eatSize(t); expect(v).toBeLessThanOrEqual(prev + 1e-9); prev = v } // only shrinks while it is eaten
+  expect(Math.abs(view.eatSize(E.grab + E.chomp * E.chomps) - E.pop * E.last) < 1e-3).toBe(true) // after the third chomp: still a bit left
+  expect(view.eatSize(E.total)).toBeLessThan(0.01)
+  expect(view.eatSize(E.total + 5)).toBeLessThan(0.01)
+})
+
+test('a held or eaten item is boosted to at least minPx tall on screen, never made smaller, and capped', () => {
+  const px = view.EAT.minPx
+  expect(px).toBeGreaterThanOrEqual(14)
+  expect(view.boostFor(1.2, 0.3, 10, px)).toBeGreaterThan(1) // 1.2 voxels * 0.3 * 10 px = 3.6 px: too small
+  expect(Math.abs((1.2 * 0.3 * 10 * view.boostFor(1.2, 0.3, 10, px)) - (px)) < 1e-6).toBe(true)
+  expect(view.boostFor(1.2, 0.3, 100, px)).toBe(1) // already 36 px: left alone
+  expect(view.boostFor(1.2, 0.3, 0.001, px)).toBe(4) // far away: the cap
+  expect(view.boostFor(0, 0.3, 10, px)).toBe(1)
+  expect(view.boostFor(NaN, 0.3, 10, px)).toBe(1)
+  // the height of a food: the tall box, or a long thing lying down counts for its length
+  expect(view.foodHeight([{ size: [1, 3, 1], at: [0, 0, 0] }])).toBe(3)
+  expect(Math.abs((view.foodHeight([{ size: [2.5, 0.5, 0.5], at: [0, 0, 0] }])) - (0.55 * 2.5)) < 1e-6).toBe(true)
+  expect(view.foodHeight([])).toBe(1)
+  for (const f of Object.values(view.FOODS)) expect(view.foodHeight(f.boxes)).toBeGreaterThan(0.5)
 })
