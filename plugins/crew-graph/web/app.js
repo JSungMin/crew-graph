@@ -1524,7 +1524,7 @@ function setHoverFromMouse() {
   if (o && tip) {
     let txt;
     if (th) txt = TK.tipText(th);
-    else if (o.root) { txt = `${o.d.type || o.id}: ${o.d.description || ''}`; const pk = packBadge(o); if (pk) txt += '\n' + packText(pk, 3, '/crew characters').join('\n'); }
+    else if (o.root) { txt = `${o.d.type || o.id}: ${o.d.description || ''}`; const pk = packInfo(o); if (pk) txt += '\n' + packText(pk, 3, '/crew characters').join('\n'); }
     else txt = `${o.path}\n${fileWho(o)}`;
     if (tip.textContent !== txt) tip.textContent = txt; tip.style.whiteSpace = 'pre-wrap'; tip.style.display = 'block';
     tip.style.left = Math.min(ptr.mx + 14, innerWidth - 350) + 'px'; tip.style.top = (ptr.my + 14) + 'px';
@@ -1931,7 +1931,7 @@ function fillCrabCard(a) {
   if (d.description && d.id !== 'main') card.appendChild(mk('div', 's', clipStr(d.description, 120)));
   card.appendChild(mk('div', 'p', (d.verb || '-') + (d.target ? ' ' + d.target : '')));
   card.appendChild(mk('div', 'p', `${a.chId || a.wantId} \u00b7 ${PC.explain(a.pick)}`));
-  const pk = packBadge(a);
+  const pk = packInfo(a); // the card lists problems whatever show.packWarnings says: that setting only hides the amber badge
   if (pk) {
     const tx = packText(pk, 3, 'Settings\u2026');
     card.appendChild(mk('div', 's', clipStr(tx[0], 60)));
@@ -1963,7 +1963,7 @@ function updateCard(o) {
     return;
   }
   const sm = o.root || o.tk ? null : summaryFor(o), sec = Math.floor(liveNow() / 1000);
-  const key = o.tk ? TK.cardKey(o) : o.root ? ['a', o.id, o.d.status, o.d.verb, o.d.target, o.d.steps, o.d.calls, o.chId, o.pick && o.pick.how, packVer, PS.show.packWarnings, sec].join('|') : ['f', o.path, o.d.last, sm ? 1 : 0, Math.floor(sec / 5)].join('|');
+  const key = o.tk ? TK.cardKey(o) : o.root ? ['a', o.id, o.d.status, o.d.verb, o.d.target, o.d.steps, o.d.calls, o.chId, o.pick && o.pick.how, packVer, sec].join('|') : ['f', o.path, o.d.last, sm ? 1 : 0, Math.floor(sec / 5)].join('|');
   if (key !== cardKey) {
     cardKey = key; card.textContent = '';
     if (o.tk) TK.fillCard(o, card, mk); else if (o.root) fillCrabCard(o); else fillFileCard(o, sm);
@@ -2441,7 +2441,7 @@ function fillDetail() {
   txt('dTok', `${fmtK(d.ctxTokens)} / ${fmtK(d.outTokens)}`);
   txt('dTime', d.startedAt ? fmtDur((d.endedAt || now) - d.startedAt) : '-');
   txt('dMood', '\u2665 ' + a.mood.pets + ' \u00b7 \uaf2c\uc9d1\ud798 ' + a.mood.pinches);
-  const pk = packBadge(a), pd = $('dPack');
+  const pk = packInfo(a), pd = $('dPack');
   if (pd) { pd.style.display = pk ? 'block' : 'none'; txt('dPack', pk ? packText(pk, 99, '').join('\n') + '\n' + pk.problems.map((p) => 'fix: ' + p.fix).join('\n') : ''); }
 }
 const closeBtn = $('dClose'); if (closeBtn) closeBtn.addEventListener('click', () => { selected = null; setDetail(); });

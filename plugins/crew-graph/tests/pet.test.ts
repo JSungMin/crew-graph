@@ -414,19 +414,18 @@ const CHARS = [
   { id: 'zip', name: 'Zippy' },
 ]
 
-test('a character whose pack has problems is offered "Pack problems…" (with how many), which opens Settings at that pack; others are not', () => {
+test('a character whose pack has problems is offered "Pack problems…", which opens Settings at that pack; others are not', () => {
   const sent: unknown[] = []
   const act = { set: () => undefined, focus: () => undefined, packs: (id: string) => void sent.push(id) }
   const plain = crabItems({ ctx: { id: 'a1', type: 'Explore', cur: 'zip', chars: CHARS }, settings: cfg({}), session: 'sess', act, agentKeyOf: pet.agentKey })
   expect(labelsOf(plain).some(l => l.startsWith('Pack problems'))).toBe(false)
   const items = crabItems({ ctx: { id: 'a1', type: 'Explore', cur: 'zip', chars: CHARS, pack: { id: 'zip', level: 'warn', n: 3 } }, settings: cfg({}), session: 'sess', act, agentKeyOf: pet.agentKey })
   const labels = labelsOf(items)
-  expect(labels).toContain('Pack problems (3)…')
-  expect(labels.indexOf('Pack problems (3)…')).toBeGreaterThan(labels.indexOf('Show in Crew pane'))
-  items.find(i => i.label === 'Pack problems (3)…')?.click?.({ checked: false })
+  expect(labels).toContain('Pack problems…')
+  expect(labels.indexOf('Pack problems…')).toBeGreaterThan(labels.indexOf('Show in Crew pane'))
+  items.find(i => i.label === 'Pack problems…')?.click?.({ checked: false })
   expect(sent).toEqual(['zip'])
-  expect(packLabel({ id: 'x', level: 'error', n: 0 })).toBe('Pack problems…')
-  expect(packLabel({ id: 'x', level: 'error', n: 1 })).toBe('Pack problems (1)…')
+  expect(packLabel()).toBe('Pack problems…')
 })
 
 test('a character is offered Character > (radio items for every character and Random), then Only this agent, near the top', () => {

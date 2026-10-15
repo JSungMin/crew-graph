@@ -48,8 +48,8 @@ export function characterItems({ chars, value, pick }) {
   ]
 }
 
-/** "Pack problems…" with a count: "Pack problems (2 errors)…" would be longer than it helps, so just the number. */
-export const packLabel = pack => (pack && pack.n > 0 ? `Pack problems (${pack.n})…` : 'Pack problems…')
+/** The menu entry that opens Settings at the pack's problems. */
+export const packLabel = () => 'Pack problems…'
 
 /**
  * The top of a character's right-click menu.
@@ -79,7 +79,7 @@ export function crabItems({ ctx, settings, session, act, agentKeyOf, canAsk = fa
     { type: 'separator' },
     ...(canAsk ? [{ label: 'Ask Claude…', click: () => act.ask() }] : []),
     { label: 'Show in Crew pane', click: () => act.focus() },
-    ...(ctx.pack ? [{ label: packLabel(ctx.pack), click: () => act.packs(ctx.pack.id) }] : []),
+    ...(ctx.pack ? [{ label: packLabel(), click: () => act.packs(ctx.pack.id) }] : []),
     ...(action === 'dismiss' && canAsk ? [{ label: 'Dismiss', click: () => act.dismiss() }] : []),
     ...(action === 'stop' && canAsk ? [{ label: 'Ask Claude to stop it', click: () => act.stop() }] : []),
     { type: 'separator' },

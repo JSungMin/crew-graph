@@ -13,7 +13,7 @@ export type MenuItem = {
 export type PetSettingsLike = { types: Record<string, string>; agents: Record<string, string> }
 export type CharChoice = { id: string; name?: string }
 export type PackRef = { id: string; level: 'error' | 'warn'; n: number }
-export function packLabel(pack: PackRef | null | undefined): string
+export function packLabel(): string
 
 export type AgentLike = { id?: string; status?: string }
 export function agentAction(agent: AgentLike | null | undefined): '' | 'dismiss' | 'stop'
