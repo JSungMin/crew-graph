@@ -55,6 +55,29 @@ html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);font:12px/1.
 #help{position:fixed;left:50%;top:10px;transform:translateX(-50%);color:var(--dim);font-size:10px;opacity:.55;pointer-events:none}
 @media (max-width:820px){#right{display:none}#left{width:230px}#help{display:none}}
 body.embed #left, body.embed #right, body.embed #chip, body.embed #help, body.embed #tip { display: none !important; }
+/* ?overlay: the desktop pet. A transparent window: no background, no HUD, only the crabs, a grip and a small card. */
+body.overlay, html.overlay { background: transparent !important; overflow: hidden; }
+body.overlay #left, body.overlay #right, body.overlay #chip, body.overlay #help, body.overlay #tip { display: none !important; }
+#grip{position:fixed;right:1px;bottom:1px;width:22px;height:22px;z-index:5;display:none;opacity:0;transition:opacity .15s;cursor:nwse-resize;touch-action:none}
+body.overlay #grip{display:block}
+body.overlay.hot #grip, body.overlay.sizing #grip{opacity:.9}
+#grip svg{display:block;width:100%;height:100%;filter:drop-shadow(0 0 1px rgba(0,0,0,.9))}
+#hcard{position:fixed;z-index:6;display:none;pointer-events:none;max-width:300px;background:rgba(14,16,24,.94);border:1px solid rgba(255,255,255,.16);border-radius:9px;padding:6px 8px;font-size:11px;line-height:1.35;color:#e6e9f2;word-break:break-word;overflow:hidden;box-shadow:0 2px 10px rgba(0,0,0,.45)}
+#hcard b{font-weight:600} #hcard .p{color:#8b93a7;font-size:10px} #hcard .s{margin-top:3px;color:#cfd4e4} #hcard .h{margin-top:2px;color:#aab2c6;font-size:10px}
+#plate{position:fixed;top:5px;left:50%;transform:translateX(-50%);z-index:5;display:none;align-items:center;gap:6px;max-width:calc(100% - 20px);background:rgba(14,16,24,.88);border:1px solid rgba(255,255,255,.16);border-radius:999px;padding:2px 11px 2px 8px;font-size:11px;line-height:1.5;color:#e6e9f2;white-space:nowrap;cursor:grab;touch-action:none;user-select:none}
+body.overlay.hasplate #plate{display:flex}
+#plate i{width:9px;height:9px;border-radius:50%;flex:none;box-shadow:0 0 5px currentColor}
+#plate b{font-weight:600;flex:none} #plate .t{overflow:hidden;text-overflow:ellipsis;color:#cfd4e4}
+body.ended #plate{opacity:.55} body.ended #stage canvas{opacity:.45;filter:grayscale(.75)}
+#more{position:fixed;z-index:7;display:none;min-width:150px;max-width:calc(100% - 12px);max-height:70%;overflow:hidden;background:rgba(14,16,24,.96);border:1px solid rgba(255,255,255,.18);border-radius:9px;padding:4px;font-size:11px;color:#e6e9f2;box-shadow:0 2px 10px rgba(0,0,0,.5)}
+#more .mh{color:#8b93a7;font-size:10px;padding:2px 6px} #more .mr{padding:2px 6px;border-radius:5px;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#more .mr:hover{background:rgba(255,255,255,.12)} #more .mr.off{opacity:.5;cursor:default} #more .mr .p{color:#8b93a7;font-size:10px}
+body.collapsed #stage, body.collapsed #grip, body.collapsed #ticker, body.collapsed #hcard, body.collapsed #more{display:none !important}
+body.collapsed #plate{top:3px}
+#ticker{position:fixed;left:6px;bottom:6px;z-index:5;display:none;flex-direction:column;gap:2px;max-width:calc(100% - 34px);pointer-events:none}
+body.overlay #ticker{display:flex} body.overlay.noticker #ticker{display:none}
+#ticker div{align-self:flex-start;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;background:rgba(14,16,24,.82);border-radius:8px;padding:1px 7px;font-size:10px;color:#e6e9f2;transition:opacity 1s}
+#ticker div.old{opacity:0}
 </style>
 </head>
 <body>
@@ -106,6 +129,11 @@ body.embed #left, body.embed #right, body.embed #chip, body.embed #help, body.em
 </div>
 
 <div id="chip"></div>
+<div id="hcard"></div>
+<div id="ticker"></div>
+<div id="plate"></div>
+<div id="more"></div>
+<div id="grip" title="resize"><svg viewBox="0 0 18 18"><g fill="#ffb27a"><circle cx="14" cy="14" r="1.6"/><circle cx="14" cy="9" r="1.6"/><circle cx="9" cy="14" r="1.6"/><circle cx="14" cy="4" r="1.6"/><circle cx="9" cy="9" r="1.6"/><circle cx="4" cy="14" r="1.6"/></g></svg></div>
 <div id="tip"></div>
 <div id="help">drag: rotate &middot; right-drag: pan &middot; wheel: zoom &middot; click a crab for details</div>
 

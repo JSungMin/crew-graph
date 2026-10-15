@@ -111,6 +111,8 @@ export type Config = {
   statusLine: boolean
   /** crew-graph: start the browser view's data export when a session starts. */
   webOnStart: boolean
+  /** crew-graph: start the desktop pet when a session starts. */
+  petOnStart: boolean
   /** crew-graph: the in-pane 3D view's frame rate and height in rows. */
   view3dFps: number
   view3dRows: number
@@ -150,6 +152,7 @@ export const parseConfig = (o: Readonly<Record<string, unknown>>): Config => {
     openOnStart: bool('openOnStart', true),
     statusLine: bool('statusLine', true),
     webOnStart: bool('webOnStart', false),
+    petOnStart: bool('petOnStart', false),
     view3dFps: typeof o.view3dFps === 'number' ? Math.min(20, Math.max(1, Math.round(o.view3dFps))) : 10,
     view3dRows: typeof o.view3dRows === 'number' ? Math.min(60, Math.max(8, Math.round(o.view3dRows))) : 28,
     view3dColumns: typeof o.view3dColumns === 'number' ? Math.min(240, Math.max(40, Math.round(o.view3dColumns))) : 110,

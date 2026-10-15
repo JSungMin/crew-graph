@@ -87,13 +87,22 @@ export function describeCall(tool: string, e: Record<string, unknown>, cwd: stri
   }
 }
 
-export function touchFile(list: FileNode[], path: string, key: string, op: 'r' | 'w', now: number): FileNode[] {
+/** A tool call's file as an absolute path in forward slashes: a relative one is taken from `cwd`. */
+export function absPath(file: string, cwd: string): string | undefined {
+  if (!file) return undefined
+  const f = file.replace(/\\/g, '/')
+  if (f.startsWith('/') || /^[A-Za-z]:\//.test(f)) return f
+  const root = cwd.replace(/\\/g, '/').replace(/\/$/, '')
+  return root ? `${root}/${f.replace(/^\.\//, '')}` : undefined
+}
+
+export function touchFile(list: FileNode[], path: string, key: string, op: 'r' | 'w', now: number, abs?: string): FileNode[] {
   const found = list.find(n => n.path === path)
   const prev = found?.by[key]
   const merged: 'r' | 'w' | 'rw' = prev && prev !== op ? 'rw' : op
   const node: FileNode = found
-    ? { ...found, by: { ...found.by, [key]: merged }, last: now }
-    : { path, kind: kindOf(path), by: { [key]: op }, last: now }
+    ? { ...found, by: { ...found.by, [key]: merged }, last: now, ...(abs ? { abs } : {}) }
+    : { path, kind: kindOf(path), by: { [key]: op }, last: now, ...(abs ? { abs } : {}) }
   return [node, ...list.filter(n => n.path !== path)].slice(0, MAX_FILES)
 }
 
@@ -111,9 +120,16 @@ export function verbOfCard(c: AgentCard, act: LoopAct | undefined): Verb {
 
 const basename = (p: string) => p.replace(/\\/g, '/').replace(/\/$/, '').split('/').pop() ?? ''
 
+/** A session's name for its window: the first prompt on one line, credentials masked, about 32 cells. */
+export function titleOf(text: string): string {
+  return clip(redact(text.replace(/\p{Cc}+/gu, ' ').replace(/\s+/g, ' ').trim()), 32)
+}
+
 export type SnapshotInput = {
   now: number
   sessionId: string
+  /** The session's title (its first prompt, see titleOf); empty before there is one. */
+  title?: string
   cwd: string
   main: Main
   usage: Usage
@@ -174,6 +190,9 @@ export function snapshotOf(s: SnapshotInput) {
     session: {
       id: s.sessionId,
       cwd: basename(s.cwd),
+      title: s.title || undefined,
+      // The full working directory, for the pet's "show in folder"; the data file lives under the user's own home.
+      cwdAbs: s.cwd ? s.cwd.replace(/\\/g, '/') : undefined,
       model: s.main.model,
       effort: s.main.effort || undefined,
       mode: s.main.mode || undefined,
