@@ -2,7 +2,7 @@
 
 The full reference. For the short version, see the [README](../README.md) ([한국어](../README.ko.md)).
 
-- [Panels](#panels) · [3D view in the pane](#3d-view-in-the-pane) · [3D web view](#3d-web-view) · [Desktop pet](#desktop-pet) · [Settings in the pet](#settings-in-the-pet)
+- [Panels](#panels) · [3D view in the pane](#3d-view-in-the-pane) · [3D web view](#3d-web-view) · [Desktop pet](#desktop-pet) · [Settings in the pet](#settings-in-the-pet) · [Tasks](#tasks)
 - [Characters](#characters) · [Commands](#commands) · [Configure](#configure) · [What it can reach](#what-it-can-reach) · [Develop](#develop)
 
 ## Panels
@@ -81,7 +81,7 @@ Other `/crew web` forms:
 - `/crew web off` stops it.
 - The `webOnStart` option starts the export when a session starts.
 
-`index.html?demo` runs the view on synthetic data, and `?demo=busy` on a busier set (six agents, eighteen files).
+`index.html?demo` runs the view on synthetic data, `?demo=busy` on a busier set (six agents, eighteen files) and `?demo=tasks` on one that plays every state of the [tasks](#tasks).
 
 ## Desktop pet
 
@@ -103,6 +103,7 @@ Several sessions can run at once. Each session writes its own `~/.claude/crew-gr
 | Stroke a crab: short strokes back and forth with the button up (just hovering) | Pet |
 | Click (or double-click) a file paper | Opens it (inside Orca with `orca file open --focus`, else the system opens it; programs and scripts are shown in the folder instead of run) |
 | Click a `+N` chip | A list of the files folded behind it; click one to open it |
+| Hover a task (the food an agent holds or keeps on its plate) | A card: its title, state, owner and what it is doing now (see [Tasks](#tasks)) |
 | Shift+click a file | Shows it in the file manager |
 | Double-click the name pill, or right-click it and choose Collapse | Folds the window down to its title bar, with the 3D view closed; the same again expands it |
 | Hover a crab or a file | A card: the agent's status, steps, which character it is and why (`robot · matched: code, test`) and last events; or the file's readers and writers and a summary of its first 64 KB (title, first paragraph and headings for text, leading comment and top-level names for code), made by heuristics, no model |
@@ -149,7 +150,7 @@ The `petOnStart` option starts the pet when a session starts.
 Right-click anything and choose **Settings…**, or use the tray icon. It opens one small window (shared by all sessions; dark and rounded like the cards) whose changes apply to every pet window at once:
 
 - **Characters.** A *default for all agents* (a character, **Match role (auto)**, **Random**, or follow the `characters` option), each character as a tile with a live 3D preview (the same character code, idling; your own characters appear too), a character per *agent type* (the types seen in your sessions, `main`, and `*` for any other type) and one for a single *agent*. The right-click menu on a character sets the same things. When a character changes, the old one spins away, a puff of smoke, and the new one pops in.
-- **Show.** Speech bubbles, the activity ticker, file papers and the nameplate, each on or off.
+- **Show.** Speech bubbles, the activity ticker, file papers, the nameplate and the tasks, each on or off. **Food** gives the tasks as each character's own food (the default) or as paper tickets.
 - **Motion.** *Reduce motion* turns off the idle shuffles, drops the particle bursts and caps the frame rate lower (about 15 busy, 6 idle).
 - **Agents.** *Auto-dismiss finished agents* after 5, 10 or 30 minutes, or off.
 - **Window.** Always on top, opacity (60 to 100 %), a size preset S, M or L (besides dragging the grip), and **Reset to defaults**.
@@ -160,11 +161,48 @@ The pet keeps these in `~/.claude/crew-graph/overlay/pet-settings.json`; only th
 
 ```json
 { "default": "auto", "types": { "Explore": "cat", "*": "auto" }, "agents": { "<session id>|<agent id>": "robot" },
-  "show": { "bubbles": true, "ticker": true, "papers": true, "nameplate": true },
+  "show": { "bubbles": true, "ticker": true, "papers": true, "nameplate": true, "tasks": true }, "food": "character",
   "reduceMotion": false, "alwaysOnTop": true, "opacity": 100, "size": "M", "autoDismiss": 0 }
 ```
 
 `/crew characters` prints what it says about characters (or that there is none yet) and what `auto` would pick for the agents of the latest snapshot, with the reason. To try the Settings window without a session: `electron overlay/main.js --page web/index.html --state <dir> --shot-settings out.png --demo`.
+
+## Tasks
+
+Every agent's to-do list is shown as food. The pet and `/crew web` draw the same thing from the snapshot's `tasks` (see [the data contract](DATA_CONTRACT.md#tasks)); the 3D view inside the pane (`/crew 3d`) does not.
+
+**Where the tasks come from.** The mod only reads the calls; it changes nothing.
+
+| Source | What it reads | Whose it is |
+| --- | --- | --- |
+| `TodoWrite` | The agent's whole list. Every call replaces that agent's previous list. An item gets a stable id (the agent and a hash of its text), so the page can tell when one changed. | The agent that made the call |
+| `TaskCreate` / `TaskUpdate` | The subject, `activeForm`, status (`pending`, `in_progress`, `completed`, `deleted`), `addBlockedBy` and `owner`. A new task's id comes from the result of `TaskCreate` (or, failing that, the `#n` in its text). | The agent that last set it `in_progress`, or the `owner` field when it names a known agent (an id, or the type or name it was started under); else nobody |
+| Subagents | Every subagent card is a ticket: its task as the title; running is in progress, done is completed, failed or stopped is failed. These need no task tool at all. | The child; its parent eats it when it is done |
+
+The agent is the one the call's `agentId` names (main when it has none), the same field the mod uses to tell who read or wrote a file. A task of an agent that is not on show is main's. An architect started as a consult has no card, so no ticket.
+
+**What you see.**
+
+| State | The agent |
+| --- | --- |
+| pending | A small stack on a plate beside its owner: five at most, then a `+N` chip. A task nobody took sits on a shared table beside main. |
+| in progress | Holds it in its hand and works on it: the robot hammers it, the cat paws at it, the bunny nibbles at its corner, the crab snips, the hamster rolls it. It does this only while its verb leaves the arms free (thinking, planning, waiting), so reading, editing and running are never hidden. The speech bubble says the item's `activeForm` ("Running tests"). |
+| completed | Eats it: to the mouth, three chomps while it shrinks and crumbs fly, happy eyes and a hop, about 1.2 s in all. Then the `✓ N` beside its plate counts it. A subagent's ticket is first carried by the child along its link to the parent, who eats it. |
+| failed | The food turns grey and lies on the ground; the agent sighs. |
+| deleted | A puff of smoke. |
+| blocked | A little lock on the item (its `blockedBy` lists an open task), and the owner taps a foot. |
+
+Hover an item for a card: its title, state, owner and what it is doing now.
+
+**Food.** One kind per character: the crab a fish, the bunny a carrot, the cat a treat stick, the hamster (`mochi`) a sunflower seed, the robot a battery, anyone else a paper ticket. A voxel pack picks its own with a `food` key: the id of a built-in food (`fish`, `carrot`, `treat`, `seed`, `battery`, `ticket`), or boxes like a bone (`"food": { "boxes": [...] }`: up to 40, centred on 0, about 2.5 voxels long with the long side along x). In the pet's Settings, **Food** switches every character to paper tickets.
+
+**Only what happens while you watch is played.** The page compares each snapshot with the last by task id. The first snapshot after a start, a reload or a switch of session is the baseline: what is done stays eaten and its count shows at once, and nothing is eaten again. A task that arrives already done (the mod writes about twice a second, so two steps can land in one write) is eaten when it appears. The `✓ N` is the mod's count of tasks finished this session (it does not shrink when old ones fall out of the list), and a reload shows it at once.
+
+**Motion.** *Reduce motion* has no crumbs, no smoke and no carrying: an eaten item fades for a moment and the count goes up. An eat, a carry and a puff of smoke count as "something moves" for the pet's frame rate (about 30 frames a second while anything moves). While the pet dozes (nothing for two minutes, or the session is not running), the agents hold their food and stand still.
+
+**Settings.** `show.tasks` (default on) and `food` (`character`, the default, or `ticket`) in `pet-settings.json`, or the pet's Settings window. `index.html?demo` shows a to-do list on the crab, and `?demo=tasks` plays every state with all five characters: to-do items going from pending to in progress to eaten, a subagent's ticket carried to its parent, a blocked task, a failed one and a deleted one.
+
+**What the mod keeps.** The tasks live in the session's state (a list per source, at most 200 each, and a count per agent), end with the session and are cleared by `/crew reset`. The snapshot lists every open task up to 40, the last 10 closed ones and a deleted one for 5 s. A title is one line, credentials masked, cut to about 80 cells. The titles go into `data.js` and `sessions/<id>.js`, which stay on your machine (see [What it can reach](#what-it-can-reach)).
 
 ## Characters
 
@@ -219,6 +257,8 @@ main=crab, Explore=bunny, sonnet-coder=robot, architect=mochi, *=auto
 
   The rig is `root body head earL earR eyeL eyeR mouth armL handL armR handR legL1 legL2 legL3 legR1 legR2 legR3 tail`; every bone is optional. Units are voxels of the crab (7 wide); x is right, y up, z toward the viewer. A bone's `at` is relative to its `parent` (default `body`) and it turns about its own origin, so put the origin where it should bend. `mirror` copies another bone with x flipped. A box is `{ size, at, color }`, with optional `rot` (radians), `unlit` (an LED) and `fixed` (not tinted when the agent fails or is done). Optional top-level keys: `scale`, `base` (`{ h, s, l, spread }`, the `@base` colour, hue-shifted a little per agent type), `eyes` (boxes per expression for the left eye: `x`, `squint`, `happy`, `sleepy`, `dizzy`; the right eye is mirrored, missing ones are generated), `props` (where the reading page, the architect's hat and the web antenna sit), `hit`, `shadow`, `travel`, and `traits` (role words for `auto`, e.g. `["code", "test", "cheerful"]`: up to 16 words of letters, digits, `-` and `_`, see "Match role" above).
 
+  A pack can also bring the `food` its agent works on and eats (see [Tasks](#tasks)).
+
 - **`*.glb`: a skinned model.** A glTF binary whose bones (nodes) are named like the rig. Case and `_` `.` space `-` do not matter: `Head`, `arm_L`, `Arm.R`, `mixamorig:Head`, `left arm` and `L_Leg` all match. The viewer turns the bones relative to the model's own rest pose (whatever their local axes), bobs, leans and squashes the model as a whole, scales it to the crab's footprint (about 7 wide and 6.5 tall) and stands it on the ground facing +z (a model whose eyes are at its back is turned around). Extra nodes named `eyeL_happy`, `eyeL_x`, `eyeL_squint`, `eyeL_sleepy`, `eyeL_dizzy` (and `eyeR_...`), placed beside the eye bones, are shown instead of the eye for that expression; without them the eyes just blink shut. Draco, Meshopt and KTX2 are not supported.
   - **How the bytes get to the page.** Files up to 4 MiB (the most the mod's `fs.read` can hand over) are embedded as base64 script parts in `characters-glb/`, which works everywhere, in a browser on `file://` and in the pet. A larger file is read from the folder by the page itself: the pet (Electron) can do that, a browser on `file://` usually refuses unless it runs with file access, and then the character falls back to a crab and the console says why.
   - `node tools/make-test-glb.mjs out.glb` (run it from a checkout of this repository; the installed plugin does not carry `tools/`) writes a small test model (a made-up "puff") with a rig-named skeleton, for trying the path.
@@ -259,9 +299,9 @@ The mod mostly watches: every hook passes its event on unchanged, and a hook tha
 - **Network:** none from the mod or the viewer. three.js r158 is bundled in `web/three.min.js` (MIT). Installing Electron downloads it from npm and from Electron's release host, once.
 
 What it keeps:
-- **`overlay/pet-settings.json`:** the pet's settings (characters per type and per agent, what is shown, motion, window, auto-dismiss). Written by the pet process only, with a temp file and a rename; `<session id>|<agent id>` keys are the only session ids in it.
-- **Session state:** short summaries (tool name plus path or command, with credentials masked), which end with the session.
-- **`data.js` and `sessions/<id>.js`:** the folder's basename, agent descriptions, the session's first prompt (shortened to about 32 characters, credentials masked), file paths relative to the session folder, and short event texts. Each file also lists its absolute path (`abs`) and the session folder's full path (`cwdAbs`), so the pet can open and summarize files. Both files are local, under your home.
+- **`overlay/pet-settings.json`:** the pet's settings (characters per type and per agent, what is shown, the tasks' food, motion, window, auto-dismiss). Written by the pet process only, with a temp file and a rename; `<session id>|<agent id>` keys are the only session ids in it.
+- **Session state:** short summaries (tool name plus path or command, with credentials masked), and the agents' to-do items and tasks (titles one line, credentials masked, about 80 cells), which end with the session.
+- **`data.js` and `sessions/<id>.js`:** the folder's basename, agent descriptions, the session's first prompt (shortened to about 32 characters, credentials masked), file paths relative to the session folder, short event texts, and the titles of the agents' tasks (one line, credentials masked, about 80 cells). Each file also lists its absolute path (`abs`) and the session folder's full path (`cwdAbs`), so the pet can open and summarize files. Both files are local, under your home.
 
 ## Develop
 

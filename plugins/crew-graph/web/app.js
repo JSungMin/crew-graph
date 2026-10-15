@@ -24,6 +24,7 @@ let edges = [];
 let lastSnap = null, recvAt = 0, gotReal = false, demoOn = false;
 let maxSeen = 0, inited = false, sessionId = null, fileSeq = 0;
 let selected = null, hover = null;
+let TK = null;              // the tasks (tasks.js): the agents' to-do items as food they work on and eat; null in ?embed and the Settings previews
 const params = new URLSearchParams(location.search || '');
 const forceDemo = params.has('demo');
 // ?embed: drawn into the terminal's Crew pane by bin/crew-3d.mjs; no HUD, no demo fallback.
@@ -190,7 +191,7 @@ let PS = PC.sanitize(null);   // the pet settings (overlay/main.js owns them and
 const autoState = { locks: new Map() }; // `auto`: an agent keeps the character it was first given
 const CHARS = new Map();      // id -> record { id, name, kind: 'voxel' | 'glb', user, def, glb, state, gltf }
 let charIds = [];             // every declared id, built-ins first (the pool for the stable hash pick)
-let charRules = CC.parseRules(params.get('chars') || ''); // [[who, id], ...]: ?chars= here, the snapshot's `chars` when it brings one
+let charRules = CC.parseRules(params.get('chars') || (params.get('demo') === 'tasks' ? 'main=crab, *=auto' : '')); // [[who, id], ...]: ?chars= here, the snapshot's `chars` when it brings one
 let charSig = '';
 const DEFAULT_GAIT = { legL1: 0, legL2: 1, legL3: 2, legR3: 1, legR2: 2, legR1: 3 };
 const boneOf = (o) => ({ o, px: o.position.x, py: o.position.y, pz: o.position.z, rx: o.rotation.x, ry: o.rotation.y, rz: o.rotation.z, qa: null, qb: null, kpos: 1, });
@@ -883,6 +884,7 @@ function reactCrab(a, v, dt, now) {
     }
   }
   if (overlay || preview) petCrab(a, v, dt, now, R);
+  if (TK) TK.pose(a, R, v, now, dt);
   return R;
 }
 
@@ -1275,6 +1277,7 @@ function resetScene() {
   for (const f of files.values()) disposeFile(f);
   clearLinks();
   agents.clear(); files.clear(); edges = []; particles = [];
+  if (TK) TK.reset();
   effects.forEach((e) => { scene.remove(e.obj); e.mat.dispose(); }); effects.length = 0;
   selected = null; hover = null; maxSeen = 0; inited = false; fitPending = true;
   setDetail();
@@ -1363,7 +1366,7 @@ function applySnapshot(s, fromDemo) {
   lastSnap = s; recvAt = performance.now();
   if (!params.get('chars') && !fromDemo) takeRules(s.chars);
   if (renderer) {
-    try { syncScene(s); processEvents(Array.isArray(s.events) ? s.events : [], s.now || Date.now()); }
+    try { syncScene(s); if (TK) TK.sync(s); processEvents(Array.isArray(s.events) ? s.events : [], s.now || Date.now()); }
     catch (err) { if (window.console) console.error('crew-graph scene', err); }
   }
   if (overlay) { noteData(s); noteReply(s); noteAck(s); return; }
@@ -1447,12 +1450,13 @@ function strokeHover(x, y) {
 }
 function setHoverFromMouse() {
   if (ptr.mx < 0 || ptr.down) { if (overlay) updateCard(null); return; }
-  const o = pick(ptr.mx, ptr.my);
-  hover = o ? { o, id: o.root ? o.id : o.chipOf ? 'chip:' + o.chipOf.id : o.path } : null;
+  const th = TK ? TK.pickAt(ptr.mx, ptr.my) : null, o = th || pick(ptr.mx, ptr.my); // a task item is small and sits by its owner: it wins over the owner
+  hover = o && !th ? { o, id: o.root ? o.id : o.chipOf ? 'chip:' + o.chipOf.id : o.path } : null;
   const tip = $('tip');
   if (o && tip) {
     let txt;
-    if (o.root) txt = `${o.d.type || o.id}: ${o.d.description || ''}`;
+    if (th) txt = TK.tipText(th);
+    else if (o.root) txt = `${o.d.type || o.id}: ${o.d.description || ''}`;
     else txt = `${o.path}\n${fileWho(o)}`;
     if (tip.textContent !== txt) tip.textContent = txt; tip.style.whiteSpace = 'pre-wrap'; tip.style.display = 'block';
     tip.style.left = Math.min(ptr.mx + 14, innerWidth - 350) + 'px'; tip.style.top = (ptr.my + 14) + 'px';
@@ -1584,7 +1588,7 @@ function schedule(ms) {
 }
 function kick() { if (overlay && frameTimer) schedule(0); }
 function isBusy(n) {
-  if (n < busyUntil || askIsOpen || n < bubbleUntil || ptr.down || carry || sizing || overContent || particles.length || rfx.length || effects.length || shake.W > 0.03) return true;
+  if (n < busyUntil || askIsOpen || n < bubbleUntil || ptr.down || carry || sizing || overContent || particles.length || rfx.length || effects.length || shake.W > 0.03 || (TK && TK.busy())) return true;
   return !dozing && sessionRunning(); // working crabs animate smoothly
 }
 function sessionRunning() {
@@ -1795,8 +1799,9 @@ function petCrab(a, v, dt, now, R) {
 
 /* ---- speech bubbles: what a working crab is doing, a canvas sprite with its own dark background so it reads on any desktop */
 const BUB = { read: ['▤', '#4aa3ff'], edit: ['✎', '#ff9340'], search: ['?', '#ffe08a'], run: ['»', '#c3cadb'], web: ['@', '#7ee0ff'], spawn: ['+', '#7ee0ff'], plan: ['☰', '#c08cff'], think: ['…', '#bcd0ff'] };
+const BUB_TASK = ['☰', '#c08cff'];
 function makeBubble() {
-  const cv = document.createElement('canvas'); cv.width = 384; cv.height = 84;
+  const cv = document.createElement('canvas'); cv.width = 480; cv.height = 84;
   const tex = new T.CanvasTexture(cv); tex.colorSpace = T.SRGBColorSpace;
   const mat = new T.SpriteMaterial({ map: tex, transparent: true, depthTest: false, fog: false, opacity: 0 });
   const sp = new T.Sprite(mat); sp.center.set(0.5, 0); sp.renderOrder = 12; sp.visible = false; scene.add(sp);
@@ -1820,9 +1825,10 @@ function paintBubble(B, glyph, text, col) {
   B.tex.needsUpdate = true;
 }
 function updateBubble(a, v, dt) {
-  const B = a.bub, g = PS.show.bubbles ? BUB[v] : null;
+  const act = TK && PS.show.bubbles ? TK.activeText(a) : ''; // the task in hand says what it is doing ("Running tests")
+  const B = a.bub, g = PS.show.bubbles ? BUB[v] || (act ? BUB_TASK : null) : null;
   if (g) {
-    const tgt = a.d.target ? clipStr(v === 'read' || v === 'edit' ? base(a.d.target) : String(a.d.target), 18) : '';
+    const tgt = act ? clipStr(act, 22) : a.d.target ? clipStr(v === 'read' || v === 'edit' ? base(a.d.target) : String(a.d.target), 18) : '';
     const key = v + '|' + tgt;
     if (key !== B.key) { B.key = key; paintBubble(B, g[0], tgt, g[1]); }
   }
@@ -1882,11 +1888,11 @@ function updateCard(o) {
     card.style.left = clamp(ptr.mx + 12, 4, Math.max(4, innerWidth - w - 4)) + 'px'; card.style.top = clamp(ptr.my + 14, 4, Math.max(4, innerHeight - h - 4)) + 'px';
     return;
   }
-  const sm = o.root ? null : summaryFor(o), sec = Math.floor(liveNow() / 1000);
-  const key = o.root ? ['a', o.id, o.d.status, o.d.verb, o.d.target, o.d.steps, o.d.calls, o.chId, o.pick && o.pick.how, sec].join('|') : ['f', o.path, o.d.last, sm ? 1 : 0, Math.floor(sec / 5)].join('|');
+  const sm = o.root || o.tk ? null : summaryFor(o), sec = Math.floor(liveNow() / 1000);
+  const key = o.tk ? TK.cardKey(o) : o.root ? ['a', o.id, o.d.status, o.d.verb, o.d.target, o.d.steps, o.d.calls, o.chId, o.pick && o.pick.how, sec].join('|') : ['f', o.path, o.d.last, sm ? 1 : 0, Math.floor(sec / 5)].join('|');
   if (key !== cardKey) {
     cardKey = key; card.textContent = '';
-    if (o.root) fillCrabCard(o); else fillFileCard(o, sm);
+    if (o.tk) TK.fillCard(o, card, mk); else if (o.root) fillCrabCard(o); else fillFileCard(o, sm);
     card.style.display = 'block';
   }
   card.style.maxWidth = Math.max(120, Math.min(300, innerWidth - 12)) + 'px';
@@ -2221,6 +2227,7 @@ function step(dt) {
     camera.updateMatrixWorld();
     relatedSet = relatedOf();
     agents.forEach((a) => updateCrab(a, dt, clockT, camera.position));
+    if (TK) TK.update(dt, now);
     updateRfx(now);
     files.forEach((f) => {
       if (wire2) { // folded-away files stay out of sight; a hovered node dims the files it has nothing to do with
@@ -2420,7 +2427,7 @@ function startDemo() {
 }
 function demoReset() {
   const now = Date.now();
-  demo.ag = []; demo.fl = []; demo.ev = []; demo.step = 0; demo.t0 = nowS();
+  demo.ag = []; demo.fl = []; demo.ev = []; demo.step = 0; demo.t0 = nowS(); if (DK) DK.reset();
   demo.g = { allowed: 0, asked: 0, denied: 0, pending: 0 };
   demo.ar = { consults: 0, running: false };
   demo.se = { id: 'demo', cwd: 'my-project', title: 'Refactor the settings loader', model: 'claude-opus-5-5', effort: 'high', mode: 'default', requests: 0, ctx: { used: 38000, max: 200000 }, compactions: 0, costUsd: 0.04,
@@ -2449,6 +2456,7 @@ function dFinish(id, ok, text) {
   if (ok) { dEv('done', id, a.parentId, null, text || 'finished'); dEv('answer', id, a.parentId, null, text || 'result returned'); }
   else { dEv('fail', id, null, null, text || 'failed'); demo.se.turn.errors++; }
 }
+const DK = window.CrewTasks ? window.CrewTasks.demo({ agents: () => demo.ag, dAgent: (...a) => dAgent(...a), dEv: (...a) => dEv(...a), dVerb: (...a) => dVerb(...a), dA: (id) => dA(id), reset: () => demoReset() }) : null; // the demo's tasks live in tasks.js
 const SCRIPT = [
   [0.5, () => { dEv('prompt', 'main', null, null, 'Refactor the settings loader + update docs / 문서도 업데이트'); demo.se.requests++; }],
   [2, () => { dVerb('main', 'plan', 'plans/settings-refactor.md'); dFile('plans/settings-refactor.md', 'plan', 'main', 'w'); dEv('write', 'main', 'plans/settings-refactor.md', 'Write', 'Write plan'); }],
@@ -2485,6 +2493,8 @@ const SCRIPT = [
   [40, () => { const a = dA('main'); a.status = 'idle'; a.verb = 'wait'; dEv('done', 'main', null, null, 'turn complete'); demo.se.turn.running = false; demo.se.turn.endedAt = Date.now(); }],
   [52, () => demoReset()],
 ];
+if (DK) { SCRIPT.push(...DK.steps); SCRIPT.sort((x, y) => x[0] - y[0]); } // the to-do list of the default demo, merged in by time
+const demoTasks = params.get('demo') === 'tasks';
 // ?demo=busy: six agents in a tree and eighteen files, with reads and writes going on all the time
 const demoBusy = params.get('demo') === 'busy';
 // ?demo=lineup: every character in a row, each doing the verbs of ?verbs= (default think,edit,run); ?chars= still decides who is who for the types it names
@@ -2532,12 +2542,13 @@ function demoTick() {
   const t = nowS() - demo.t0;
   if (demoLineup) { if (!demo.lineInit) { demo.lineInit = true; demoLineupInit(); } }
   else if (demoBusy) { if (!demo.busyInit) { demo.busyInit = true; demoBusyInit(); } if (Math.random() < 0.7) demoBusyEvent(); }
-  else while (demo.step < SCRIPT.length && SCRIPT[demo.step][0] <= t) { const i = demo.step++; SCRIPT[i][1](); }
+  else { const script = demoTasks && DK ? DK.script : SCRIPT; while (demo.step < script.length && script[demo.step][0] <= t) { const i = demo.step++; script[i][1](); } }
   const now = Date.now(), se = demo.se;
   demo.ag.forEach((a) => { if (a.status === 'running') { a.steps += Math.random() < 0.35 ? 1 : 0; a.calls += Math.random() < 0.4 ? 1 : 0; a.ctxTokens += Math.round(Math.random() * 600); a.outTokens += Math.round(Math.random() * 90); } });
   if (se.turn.running) { se.ctx.used += Math.round(300 + Math.random() * 700); se.costUsd += 0.0015 + Math.random() * 0.002; se.requests += Math.random() < 0.3 ? 1 : 0; }
   applySnapshot({ v: 1, now, session: JSON.parse(JSON.stringify(se)), agents: JSON.parse(JSON.stringify(demo.ag)), files: JSON.parse(JSON.stringify(demo.fl)).slice(0, 60),
-    events: demo.ev.slice(), gate: Object.assign({}, demo.g), architect: Object.assign({}, demo.ar) }, true);
+    events: demo.ev.slice(), gate: Object.assign({}, demo.g), architect: Object.assign({}, demo.ar),
+    tasks: DK && !demoLineup ? DK.tasks() : [], eaten: DK && !demoLineup ? DK.eaten() : {} }, true); // the lineup shows the characters, not their tasks
 }
 
 /* ---------------------------------------------------------------- embed grab */
@@ -2564,7 +2575,7 @@ window.__crewGrab = (w, h) => {
 /* ---------------------------------------------------------------- test hooks (?hooks): for the scripts that drive the page */
 if (params.has('hooks')) {
   window.__crewTest = {
-    agents, files, CHARS, camera, cam, shake, THREE: T, rfx, makeCrab, updateCrab, scene,
+    agents, files, CHARS, camera, cam, shake, THREE: T, rfx, makeCrab, updateCrab, scene, get tasks() { return TK; }, demoT: () => nowS() - demo.t0,
     anchorOf, noteCarryVelocity, petMove, openAsk, closeAsk, noteReply, showBubble, askOpen: () => askIsOpen,
     dismissAgents: (ids) => { const n = nowS(); ids.forEach((id, i) => { const a = agents.get(id); if (a && !a.bye) a.bye = n + i * 0.12; }); busyUntil = n + 4; kick(); }, pinchCrab, keepPet, setRules: (spec) => { charRules = CC.parseRules(spec); reskinAll(); },
     ids: () => charIds.slice(), settings: () => PS, picks: () => [...agents.values()].map((a) => [a.id, a.chId, a.pick && a.pick.how, a.pick && a.pick.mode, typeKeyOf(a)]),
@@ -2647,6 +2658,15 @@ if (overlay) {
 }
 loadCharacters();
 resize();
+if (renderer && !embed && !preview && window.CrewTasks) {
+  TK = window.CrewTasks.create({
+    T, scene, agents, camera, FONT, overlay, clamp, lerp, easeIO, easeOutBack, nowS, spawnRfx, SMOKE_TEX, anchorOf,
+    ps: () => PS, size: () => [innerWidth, innerHeight],
+    calm: () => (overlay && dozing) || PS.reduceMotion,   // asleep, or asked to hold still: nobody works on its food
+    running: () => (overlay ? sessionRunning() : true),
+    pulse: (ms) => { busyUntil = Math.max(busyUntil, nowS() + ms / 1000); kick(); },
+  });
+}
 if (preview) initPreview();
 else {
   if (!embed) requestAnimationFrame(frame); // embedded: rendering is driven by __crewGrab, never by a continuous loop

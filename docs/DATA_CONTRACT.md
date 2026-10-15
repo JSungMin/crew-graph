@@ -4,7 +4,7 @@ The mod writes these files into `~/.claude/crew-graph/`:
 
 | File | Who writes it | What it is |
 | --- | --- | --- |
-| `index.html`, `app.js`, `three.min.js`, `gltf-loader.classic.js`, `characters-core.js`, `characters.js` | Copied by the mod from `plugins/crew-graph/web/` on `/crew web` and `/crew pet`. | The viewer itself, with its GLB loader and the built-in characters. |
+| `index.html`, `app.js`, `three.min.js`, `gltf-loader.classic.js`, `characters-core.js`, `characters.js`, `tasks.js` | Copied by the mod from `plugins/crew-graph/web/` on `/crew web` and `/crew pet`. | The viewer itself, with its GLB loader, the built-in characters and the tasks (the to-do items as food). |
 | `characters/` | Created by the mod (with a `README.txt`) if missing; the **user** puts `*.json` voxel packs and `*.glb` skinned models here. | The user's own characters (see below). |
 | `characters-user.js` | Rewritten by the mod when it starts the viewer and on `/crew characters reload`, from a scan of `characters/`. | The manifest of the user's characters. |
 | `characters-glb/<id>.<n>.js` | Written with the manifest, one or more per `.glb` up to 4 MiB. | A GLB as base64 script parts. |
@@ -48,6 +48,8 @@ type Snapshot = {
   chars?: [who: string, character: string][]   // the `characters` option, parsed (see below); absent when the option is empty
   lastReply?: { at: number; text: string }     // the answer to the latest question asked from the desktop pet (see below); absent until there is one
   petAck?: number                              // the seq of the newest desktop-pet request (ask, dismiss, stop) the mod accepted (see below); absent until there is one
+  tasks: Task[]               // see Tasks below; always there, empty when nobody has a to-do list
+  eaten?: Record<string, number>   // agent id -> how many tasks it has finished (the pet's "✓ N"); absent while it is all zero
 }
 
 type Verb = 'read' | 'edit' | 'search' | 'run' | 'web' | 'spawn' | 'plan' | 'think' | 'done' | 'failed' | 'wait'
@@ -107,6 +109,31 @@ type PetRequest = { seq: number; at: number; sessionId: string; token: string } 
 
 `token` is made by the mod each time it starts the pet for a session (`launch.mjs --token`, handed to a running window by the second start) and never leaves the mod and the window; the mod acts only when `sessionId` is its own session and `token` its own, and logs and ignores any other request. `send` calls `$.prompt.submit({ text })`, framed as the plugin's (never `asUser`); `draft` calls `$.prompt.fill` (`replace`, or `append` when the prompt box already holds text). With `agentId`, `text` is followed by a short context block (type, id, status, task, last 5 event texts, files touched). `petAck` is the largest `seq` among the requests the mod accepted (right token and session), set before it acts on them, so the pet can tell a request reached a live mod: a request whose `seq` is above `petAck` eight seconds after the pet wrote it is shown as not delivered. A refused request does not raise it, and it starts again from none when the mod is reloaded. The mod records in its state that the pet is on for the session (`petOn`; `/crew pet` sets it, `/crew pet off [all]` clears it) and starts the pet again on `session.start` while it is set. `stop` asks Claude, in a framed prompt, to stop that agent when the mod knows it as running; the mod cannot stop an agent itself.
 
+## Tasks
+
+`tasks` lists what the agents have to do, from three sources, as one list. Every title is one line, credentials masked, cut to about 80 cells (`active` to about 60).
+
+```ts
+type Task = {
+  id: string                  // stable and namespaced: "todo:<agent>:<hash of the content>" (a repeat of the same text in one list gets "#2"...),
+                              // "task:<id>" for TaskCreate / TaskUpdate, "agent:<agent id>" for a subagent's ticket
+  src: 'todo' | 'task' | 'agent'
+  owner?: string              // the agent working on it ("main" or an agent id); absent for a task nobody took
+  title: string
+  active?: string             // the present-continuous form ("Running tests"), for while it is in progress
+  status: 'pending' | 'in_progress' | 'completed' | 'failed' | 'deleted'
+  blockedBy?: string[]        // ids (same namespace) of the tasks it waits for
+  deliverTo?: string          // a ticket: the parent that eats it when the child is done
+  t: number                   // when the status last changed (ms epoch)
+}
+```
+
+- **`todo`** is a `TodoWrite` call. Each call is that agent's *whole* list and replaces its previous one. An item that was open and is missing from the new list becomes `deleted`; a closed one just leaves. The agent is the one whose loop made the call (the call's `agentId`, `main` when it has none).
+- **`task`** is `TaskCreate` (its id comes from the result's `task.id`) and `TaskUpdate` (`status`, `subject`, `activeForm`, `addBlockedBy`, `owner`). The owner is the agent that last set the task `in_progress`, or the `owner` field when it names a known agent (an id, or the type or name it was started under); a task nobody took has no owner.
+- **`agent`** is a ticket for every subagent card, so there are tickets even when no agent uses the task tools. `owner` is the child, `title` its description, `deliverTo` its parent. `running` is `in_progress`, `done` is `completed`, `failed` and `stopped` are `failed`. An architect started as a consult has no card, so no ticket.
+- **What is listed:** every open task (up to 40; the subagent tickets come first, so the cap never cuts one), the last 10 closed ones (`completed`, `failed`), and `deleted` ones for 5 s after they were deleted, so the page can play the smoke puff.
+- **`eaten`** counts, per agent, the tasks that turned `completed` since the session began (or `/crew reset`): the counter does not shrink when old closed tasks fall out of the list, and it is back to nothing after `/crew reset`. A ticket counts for the parent; a `task` for its owner, or for `main` when it has none.
+
 ## Characters
 
 Every agent is drawn as a character; the default (no `chars`) is the crab. `chars` carries the `characters` option as parsed pairs, for example `[["main","crab"],["Explore","bunny"],["*","random"]]`. The viewer takes the first pair whose `who` equals the agent's `id` or `type` (case-insensitive; `architect` also matches `isArchitect`; a trailing `*` is a prefix), and uses its `character`, an id from the built-ins or the user's files; `random` and an agent no pair matches get a stable pick by hash of the agent's id among all available character ids (built-ins first, then the user's by name). An unknown id shows the crab.
@@ -133,10 +160,11 @@ type VoxelCharacter = {
   eyes?: { x?: Box[]; squint?: Box[]; happy?: Box[]; sleepy?: Box[]; dizzy?: Box[] }   // the left eye's boxes per expression; the right one is mirrored
   props?: { page?: { at: [number, number, number] }; hat?: { at: [number, number, number]; s?: number }; anten?: { at: [number, number, number]; spread?: number } }
   hit?: { y?: number; r?: number }; shadow?: [number, number]; travel?: number
+  food?: string | { boxes: Box[] } | Box[]   // the tasks' food: a built-in id (fish carrot treat seed battery ticket) or boxes like a bone's; see Tasks
 }
 ```
 
-A bone's `at` is relative to its parent (default `body`) and the bone turns about its own origin. `mirror` copies another bone with x flipped (boxes, `at`, the turn, the parent's L/R). `gait` picks which of the four leg phases a leg uses (the run cycle). Numbers are clamped and at most 400 boxes are read. GLB bones are matched by node name to the rig, case and `_` `.` space `-` ignored.
+`food` is for the tasks: up to 40 boxes on the same rules as a bone's, centred on 0, about 2.5 voxels long with the long side along x. Without it a character gets the food of its own kind (crab: fish, bunny: carrot, cat: treat stick, mochi: sunflower seed, robot: battery), anyone else a paper ticket. A bone's `at` is relative to its parent (default `body`) and the bone turns about its own origin. `mirror` copies another bone with x flipped (boxes, `at`, the turn, the parent's L/R). `gait` picks which of the four leg phases a leg uses (the run cycle). Numbers are clamped and at most 400 boxes are read. GLB bones are matched by node name to the rig, case and `_` `.` space `-` ignored.
 
 ## How the viewer animates it
 
@@ -149,4 +177,5 @@ A bone's `at` is relative to its parent (default `body`) and the bone turns abou
   - `read`: file→agent
   - `write`: agent→file
   - `deny` / `fail`: a red burst
+- **Tasks** (`tasks`, `eaten`) are voxel food, one kind per character, drawn only for changes the page sees live (the first snapshot after a start, a reload or a session switch is the baseline, so old eats do not replay). Pending items stack on a plate beside the owner (five at most, `+N` for the rest; unowned ones sit on a table by main), the one in progress is held in the owner's hand while it works on it, a `completed` one is eaten (about 1.2 s, then the owner's `✓ N`), a ticket is carried along its link to the parent first, a `failed` one turns grey, a `deleted` one goes in a puff of smoke, and one whose `blockedBy` lists an open task has a lock. Details in the guide.
 - **HUD:** context gauge, cost, rate-limit windows, gate counters, turn receipt, and a scrolling event log.

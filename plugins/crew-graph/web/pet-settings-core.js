@@ -8,7 +8,8 @@
      "default": null | "auto" | "random" | "<character id>",   // for agents nothing else decided; null: the mod option, else the crab
      "types":  { "<agent type | main | architect | prefix* | *>": "<character id | random | auto>" },
      "agents": { "<session id>|<agent id>": "<character id | random | auto>" },
-     "show": { "bubbles": true, "ticker": true, "papers": true, "nameplate": true },
+     "show": { "bubbles": true, "ticker": true, "papers": true, "nameplate": true, "tasks": true },
+     "food": "character" | "ticket",                      // the tasks agents work on and eat: each character's own food, or paper tickets
      "reduceMotion": false, "alwaysOnTop": true, "opacity": 100, "size": "" | "S" | "M" | "L",
      "autoDismiss": 0 | 5 | 10 | 30    // minutes after which the mod dismisses a finished agent from the pet and the Crew pane; 0: never
    }
@@ -25,10 +26,11 @@
 const SIZES = { S: { width: 260, height: 220 }, M: { width: 360, height: 300 }, L: { width: 520, height: 430 } };
 const OPACITY_MIN = 60, MAX_TYPES = 64, MAX_AGENTS = 200;
 const AUTO_DISMISS = [0, 5, 10, 30];
-const SHOW_KEYS = ['bubbles', 'ticker', 'papers', 'nameplate'];
+const SHOW_KEYS = ['bubbles', 'ticker', 'papers', 'nameplate', 'tasks'];
+const FOODS = ['character', 'ticket'];
 const UNSAFE_KEYS = ['__proto__', 'constructor', 'prototype'];
 
-const defaults = () => ({ v: 1, default: null, types: {}, agents: {}, show: { bubbles: true, ticker: true, papers: true, nameplate: true }, reduceMotion: false, alwaysOnTop: true, opacity: 100, size: '', autoDismiss: 0 });
+const defaults = () => ({ v: 1, default: null, types: {}, agents: {}, show: { bubbles: true, ticker: true, papers: true, nameplate: true, tasks: true }, food: 'character', reduceMotion: false, alwaysOnTop: true, opacity: 100, size: '', autoDismiss: 0 });
 /* a value a rule may have: a character id (the form only; a pack that is not loaded is not an error), `random` or `auto` */
 const okValue = (v) => typeof v === 'string' && CC.CHAR_ID.test(v);
 const okKey = (k) => typeof k === 'string' && k.length >= 1 && k.length <= 200 && !/[\u0000-\u001f]/.test(k) && UNSAFE_KEYS.indexOf(k) < 0;
@@ -49,6 +51,7 @@ function sanitize(raw) {
   s.agents = cleanMap(raw.agents, MAX_AGENTS);
   const sh = raw.show && typeof raw.show === 'object' ? raw.show : {};
   SHOW_KEYS.forEach((k) => { if (typeof sh[k] === 'boolean') s.show[k] = sh[k]; });
+  if (FOODS.indexOf(raw.food) >= 0) s.food = raw.food;
   if (typeof raw.reduceMotion === 'boolean') s.reduceMotion = raw.reduceMotion;
   if (typeof raw.alwaysOnTop === 'boolean') s.alwaysOnTop = raw.alwaysOnTop;
   if (typeof raw.opacity === 'number' && isFinite(raw.opacity)) s.opacity = Math.max(OPACITY_MIN, Math.min(100, Math.round(raw.opacity)));
@@ -72,6 +75,7 @@ function merge(cur, patch) {
     }
   }
   if (patch.show && typeof patch.show === 'object') SHOW_KEYS.forEach((k) => { if (typeof patch.show[k] === 'boolean') next.show[k] = patch.show[k]; });
+  if (FOODS.indexOf(patch.food) >= 0) next.food = patch.food;
   // a value of the wrong kind changes nothing (it does not clear what was there)
   ['reduceMotion', 'alwaysOnTop'].forEach((k) => { if (typeof patch[k] === 'boolean') next[k] = patch[k]; });
   if (typeof patch.opacity === 'number' && isFinite(patch.opacity)) next.opacity = patch.opacity;
@@ -138,5 +142,5 @@ function save(fsx, file, settings) {
   fsx.renameSync(file + '.tmp', file);
 }
 
-return { SIZES, AUTO_DISMISS, OPACITY_MIN, SHOW_KEYS, defaults, sanitize, merge, agentKey, resolve, explain, load, save, okValue };
+return { SIZES, AUTO_DISMISS, OPACITY_MIN, SHOW_KEYS, FOODS, defaults, sanitize, merge, agentKey, resolve, explain, load, save, okValue };
 });

@@ -31,9 +31,10 @@ const patchOf = p => {
   }
   if (p.show && typeof p.show === 'object') {
     out.show = {}
-    for (const k of ['bubbles', 'ticker', 'papers', 'nameplate']) if (typeof p.show[k] === 'boolean') out.show[k] = p.show[k]
+    for (const k of ['bubbles', 'ticker', 'papers', 'nameplate', 'tasks']) if (typeof p.show[k] === 'boolean') out.show[k] = p.show[k]
   }
   for (const k of ['reduceMotion', 'alwaysOnTop']) if (typeof p[k] === 'boolean') out[k] = p[k]
+  if (p.food === 'character' || p.food === 'ticket') out.food = p.food
   if (typeof p.opacity === 'number') out.opacity = p.opacity
   if (typeof p.size === 'string') out.size = short(p.size, 4)
   if (typeof p.autoDismiss === 'number') out.autoDismiss = p.autoDismiss

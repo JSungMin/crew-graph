@@ -68,6 +68,7 @@ import { BUILTIN_CHARACTERS, agentsFromDataJs, describeAgentPicks, describeChara
 import { ASK_MAX, aboutOf, autoDismissed, autoDismissOf, checkPetMsg, cleanAsk, composeAsk, composeStop, dismiss, dismissedOf, hiddenIds, isFinished, replyOf, withoutHidden } from './pet-ask'
 import type { AskAbout, PetMsg } from './pet-ask'
 import { absPath, clip, dataJs, describeCall, titleOf, pushEvent, shortPath, snapshotOf, touchFile, verbOfCard, scrollbar } from './crew'
+import { TASK_TOOLS, applyTaskCreate, applyTaskUpdate, applyTodoWrite, bumpEaten, createdId, normalizeBook, tasksOf } from './tasks'
 
 const PANE = 'crew-graph'
 const TITLE = 'Crew'
@@ -80,6 +81,7 @@ const WEB_FILES = [
   'gltf-loader.classic.js',
   'characters-core.js',
   'characters.js',
+  'tasks.js',
   'pet-settings-core.js',
   'settings.html',
   'settings.js',
@@ -105,6 +107,7 @@ const acts = atom({ plugin: 'crew-graph', key: 'acts' } as const, {})
 const files = atom({ plugin: 'crew-graph', key: 'files' } as const, [])
 const events = atom({ plugin: 'crew-graph', key: 'events' } as const, [])
 const parents = atom({ plugin: 'crew-graph', key: 'parents' } as const, {})
+const tasks = atom({ plugin: 'crew-graph', key: 'tasks' } as const, { todo: [], task: [], eaten: {} })
 const autoOpened = atom({ plugin: 'crew-graph', key: 'autoOpened' } as const, false)
 const web = atom({ plugin: 'crew-graph', key: 'web' } as const, { isOn: false, dir: '', lastWriteAt: 0 })
 const view3d = atom({ plugin: 'crew-graph', key: 'view3d' } as const, { isOn: false, cols: 0, rows: 0, status: '' })
@@ -238,6 +241,7 @@ async function resetAll($: EngineInterface) {
   await update($, files, () => [])
   await update($, events, () => [])
   await update($, parents, () => ({}))
+  await update($, tasks, () => ({ todo: [], task: [], eaten: {} }))
   await update($, sessionTitle, () => '')
   // The dismissed set belongs to the agents that were just cleared; a pending question to the pet is not answered any more.
   await update($, dismissed, () => ({}))
@@ -287,6 +291,21 @@ async function getWeb($: EngineInterface): Promise<Web> {
   return normalize(WEB_OFF, await read($, web))
 }
 
+/** TodoWrite, TaskCreate and TaskUpdate: what the agent `key` just said about its tasks (hooks/tasks.ts keeps the book). */
+async function noteTasks($: EngineInterface, e: Record<string, unknown>, ran: { result?: unknown; text?: unknown }, key: string) {
+  const now = await $.clock.now()
+  const tool = String(e.tool)
+  if (tool === 'TodoWrite') await update($, tasks, b => applyTodoWrite(normalizeBook(b), key, e, now))
+  else if (tool === 'TaskCreate') {
+    const id = createdId(ran.result, ran.text)
+    if (id) await update($, tasks, b => applyTaskCreate(normalizeBook(b), id, e, now))
+  } else {
+    const known = [{ id: 'main', type: 'main' }, ...(await getCards($)).map(c => ({ id: c.id, type: c.type }))]
+    await update($, tasks, b => applyTaskUpdate(normalizeBook(b), e, key, known, now))
+  }
+  await queueWeb($)
+}
+
 async function act($: EngineInterface, key: string, verb: Verb, tool: string, target: string) {
   const now = await $.clock.now()
   await update($, acts, all => {
@@ -320,7 +339,7 @@ async function flushWeb($: EngineInterface) {
 async function writeWeb($: EngineInterface) {
   const w = await getWeb($)
   if (!w.isOn || !w.dir) return
-  const [m, u, a, g, allCards, t, r, allActs, allFiles, allEvents, allParents, now, sid, title, shown, reply] = await Promise.all([
+  const [m, u, a, g, allCards, t, r, allActs, allFiles, allEvents, allParents, now, sid, title, shown, reply, book] = await Promise.all([
     getMain($),
     getUsage($),
     getArchitect($),
@@ -337,12 +356,15 @@ async function writeWeb($: EngineInterface) {
     read($, sessionTitle),
     getDismissed($),
     read($, lastReply),
+    read($, tasks),
   ])
   // Agents the pet dismissed are not in what the pet (or the browser) is shown.
+  const hidden = hiddenIds(allCards, shown, allActs)
   const { cards, acts: ac, files: fl, events: ev, parents: pa } = withoutHidden(
     { cards: allCards, files: allFiles, acts: allActs, events: allEvents, parents: allParents },
-    hiddenIds(allCards, shown, allActs),
+    hidden,
   )
+  const tk = normalizeBook(book)
   const snap = snapshotOf({
     now,
     sessionId: String(sid),
@@ -363,6 +385,9 @@ async function writeWeb($: EngineInterface) {
     chars: charRules,
     lastReply: reply,
     ack: petAck,
+    // a dismissed agent takes its tasks and its count with it
+    tasks: tasksOf(tk, cards, pa, now, hidden),
+    eaten: Object.fromEntries(Object.entries(tk.eaten).filter(([id]) => !hidden.has(id))),
   })
   const text = dataJs(snap)
   await $.fs.write(`${w.dir}/data.js`, text).catch(() => undefined)
@@ -1253,6 +1278,9 @@ export const register: Register = (on, options) => {
     }
     const ran = await next(e).finally(() => callLoop.delete(e.tool_use_id))
     const didRun = ran.deny === undefined
+    if (didRun && ran.isError !== true && TASK_TOOLS.has(String(e.tool))) {
+      await noteTasks($, e as unknown as Record<string, unknown>, ran as unknown as { result?: unknown; text?: unknown }, key).catch(() => undefined)
+    }
     // Settle this call's pending ask, if it had one; skip the write (and the redraw) otherwise.
     const g0 = await getGate($)
     const isSettled = settleCheck(g0, e.tool_use_id, didRun) !== g0
@@ -1392,6 +1420,11 @@ export const register: Register = (on, options) => {
           .map(normalizeCard)
           .map(c => (c.id === id ? { ...c, status, endedAt: now, answer: shorten(e.answer, 400) } : c)),
       )
+      // A finished subagent hands its ticket to the parent, who eats it (the counter the pet shows).
+      if (status === 'done') {
+        const eater = (await getParents($))[id] ?? 'main'
+        await update($, tasks, b => bumpEaten(normalizeBook(b), eater))
+      }
       const card = cards.find(c => c.id === id)
       const took = card ? fmtDuration(now - card.spawnedAt) : ''
       await say($, await whoIs($, id), status === 'done' ? `done · ${took}` : status, status === 'done' ? 'done' : 'error', id)
