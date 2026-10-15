@@ -83,8 +83,10 @@ The three.js view runs inside the Crew pane, and you can touch it.
 This copies the viewer to `~/.claude/crew-graph/` and opens `index.html` in your browser (inside Orca, in an Orca browser tab via `orca tab create`). While work runs, the mod rewrites `data.js` there at most every 450 ms. The page reloads it by script-tag injection, so it works from `file://` with no server and no network.
 
 - Every agent is a voxel Clawd that poses like its terminal twin. Agents are laid out as a tree with main at the root. Pinch it by clicking it, and pet it by stroking it.
-- Plans, docs and code float beside the agents that touched them. Read edges are blue, write edges orange.
-- Every interaction is a particle: spawn travels parent→child, an answer child→parent, a read file→agent, a write agent→file, and a denial or failure is a red burst.
+- A child hangs from its parent on one smooth tube in the child's colour; dashes run along it only while the child works, and a finished child's link is faint.
+- Plans, docs and code float in a small arc beside the agent that touched them last: five at most, with a `+N` chip for the rest. A file two agents share sits between them. There are no standing agent→file lines.
+- Every interaction is a particle: spawn travels parent→child, an answer child→parent, a read file→agent, a write agent→file, and a denial or failure is a red burst. A read or write also draws a short arc, blue for read and orange for write, that fades in about a second and a half.
+- Hover an agent to light up its files and dim everything else; hover a file to see who touched it.
 - The HUD shows the session vitals, the gate counters, the turn receipt and a live event log. Click a crab for its details.
 
 Other `/crew web` forms:
@@ -92,7 +94,43 @@ Other `/crew web` forms:
 - `/crew web off` stops it.
 - The `webOnStart` option starts the export when a session starts.
 
-`index.html?demo` runs the view on synthetic data.
+`index.html?demo` runs the view on synthetic data, and `?demo=busy` on a busier set (six agents, eighteen files).
+
+## Desktop pet
+
+```text
+/crew pet
+/crew pet off          close this session's window
+/crew pet off all      quit the pet, every window
+```
+
+The crabs on your desktop: a transparent, frameless, always-on-top window with the same three.js view and no background (no grid, floor or fog), like an idle pet app. The first `/crew pet` installs Electron (pinned to 44.4.5, about 100 MB) with npm into `~/.claude/crew-graph/overlay-runtime/`, once, in the background, and starts the pet when that is done. The pet is its own process: it outlives the session and `/reload-plugins`.
+
+Several sessions can run at once. Each session writes its own `~/.claude/crew-graph/sessions/<session id>.js` next to `data.js` (which stays as it was, for `/crew web`), and the one pet process opens one window per session, each cascaded 40 px from the last. A pill at the top of each window names its session: a colour dot, the folder, and the first prompt shortened to about 32 characters. The same colour rings the main crab. A session whose file has not changed for 10 minutes is shown dimmed as "ended", and its crabs sleep.
+
+| You do | It does |
+| --- | --- |
+| Drag a crab (a pull of about 40 px, or hold it a moment first) or drag the name pill or any other part of the picture | Carries the window. The crab dangles, its legs swing and its body sways against the movement; set down, it squash-bounces. |
+| Click a crab | Pinch (as in the browser view) |
+| Scrub a crab: short strokes back and forth, with the button down or just hovering | Pet. Two turns of direction with the button down count as a stroke, and then the window stays put. |
+| Click (or double-click) a file paper | Opens it (inside Orca with `orca file open --focus`, else the system opens it; programs and scripts are shown in the folder instead of run) |
+| Click a `+N` chip | A list of the files folded behind it; click one to open it |
+| Shift+click a file | Shows it in the file manager |
+| Double-click the name pill, or right-click it and choose Collapse | Folds the window down to its title bar, with the 3D view closed; the same again expands it |
+| Hover a crab or a file | A card: the agent's status, steps and last events; or the file's readers and writers and a summary of its first 64 KB (title, first paragraph and headings for text, leading comment and top-level names for code), made by heuristics, no model |
+| Right-drag | Rotate the camera |
+| Wheel | Zoom |
+| Ctrl+wheel, or drag the corner grip | Resize (the grip shows whenever the pointer is in the window) |
+| Right-click | A menu: Show in Crew pane (an agent's card, or a file's focus panel), Open, Show in folder, Copy path, and the window options |
+| Double-click | Refit the camera |
+
+Where the picture is transparent, clicks go through to the desktop. The page reads the alpha under the pointer, with a two-miss hysteresis, and never lets clicks through while a drag or a resize runs. The crabs turn their eyes toward a near pointer, blink, shuffle, doze with `zZ` when the session is idle for two minutes (or not running), and wake with a stretch. The window draws about 30 frames a second while something moves and about 12 when idle.
+
+Each working crab shows a small speech bubble with what it does (`✎ app.js`, `» npm test`, `? register`). An optional ticker at the bottom (tray menu, "Activity ticker") lists the last three events for about six seconds each.
+
+The tray icon (a crab) offers Show, Always on top, Activity ticker, Reset position & size, a list of the open sessions (Show, Close) and Quit. Window positions and sizes are kept per session in `~/.claude/crew-graph/overlay/overlay-state.json`.
+
+The `petOnStart` option starts the pet when a session starts.
 
 ## Install
 
@@ -115,6 +153,8 @@ If you also have Flightdeck installed, turn it off. crew-graph includes all of i
 | `/crew layout auto\|compact\|wide\|mini` | Set the layout for this session. |
 | `/crew 3d [off]` | The 3D view inside the pane. |
 | `/crew web [noopen\|off]` | The 3D browser view. |
+| `/crew pet` | The desktop pet: the crabs in a transparent always-on-top window, one window per session. |
+| `/crew pet off [all]` | Close this session's pet window, or (`all`) quit the pet. |
 
 Focus the pane with `ctrl+x tab`:
 - `1`…`6` expand an agent card.
@@ -124,20 +164,20 @@ Focus the pane with `ctrl+x tab`:
 
 All of Flightdeck's options apply. Set them in `/config` or under `pluginConfigs["crew-graph"].options`:
 - `architectPattern`, `architectLabel`, `gateLabel`, `panels`, `motion`, `moments`, `matchDescriptions`, `maxCards`, `layout`, `palette`, `openOnStart`, `statusLine`
-- `webOnStart`, `view3dFps`, `view3dRows`, `view3dColumns` and `view3dMode` (crew-graph only)
+- `webOnStart`, `petOnStart`, `view3dFps`, `view3dRows`, `view3dColumns` and `view3dMode` (crew-graph only)
 
 The default `panels` value is `3d,main,crew,architect,gate,agents,loops,receipt,log`. The 3d panel shows only while `/crew 3d` runs.
 
 ## What it can reach
 
 The mod only watches: every hook passes its event on unchanged, and a hook that throws passes the event on. It does reach outside the session in three places:
-- **Files:** it writes files only under `~/.claude/crew-graph/`, and only after `/crew web` (or `webOnStart`).
-- **Processes:** it starts the OS "open" command (`explorer`, `open` or `xdg-open`), or `orca tab create` inside Orca, when `/crew web` opens the page. With `/crew 3d` it also starts `node bin/crew-3d.mjs`, which starts a headless browser and listens on 127.0.0.1 (token-protected) for the pane's pointer input.
-- **Network:** none. three.js r158 is bundled in `web/three.min.js` (MIT).
+- **Files:** it writes files only under `~/.claude/crew-graph/`, and only after `/crew web` or `/crew pet` (or `webOnStart`, `petOnStart`). The pet's own window state, its quit and close requests and its "show in Crew pane" requests live in `~/.claude/crew-graph/overlay/`.
+- **Processes:** it starts the OS "open" command (`explorer`, `open` or `xdg-open`), or `orca tab create` inside Orca, when `/crew web` opens the page. With `/crew 3d` it also starts `node bin/crew-3d.mjs`, which starts a headless browser and listens on 127.0.0.1 (token-protected) for the pane's pointer input. With `/crew pet` it runs `npm install electron@44.4.5` (and Electron's own binary download) once, into `~/.claude/crew-graph/overlay-runtime/`, then `node overlay/launch.mjs`, which starts Electron detached, so the pet outlives the session. The pet opens a file (`orca file open`, or the OS) only when you click it, and only a file listed in that session's snapshot; it reads at most the first 64 KB of such a file, for the hover summary.
+- **Network:** none from the mod or the viewer. three.js r158 is bundled in `web/three.min.js` (MIT). Installing Electron downloads it from npm and from Electron's release host, once.
 
 What it keeps:
 - **Session state:** short summaries (tool name plus path or command, with credentials masked), which end with the session.
-- **`data.js`:** the folder's basename (never the full path), agent descriptions, file paths relative to the session folder, and short event texts.
+- **`data.js` and `sessions/<id>.js`:** the folder's basename, agent descriptions, the session's first prompt (shortened to about 32 characters, credentials masked), file paths relative to the session folder, and short event texts. Each file also lists its absolute path (`abs`) and the session folder's full path (`cwdAbs`), so the pet can open and summarize files. Both files are local, under your home.
 
 ## Develop
 

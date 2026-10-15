@@ -126,6 +126,8 @@ export type FileNode = {
   /** loop key -> 'r' (read), 'w' (wrote), 'rw'. */
   by: Record<string, 'r' | 'w' | 'rw'>
   last: number
+  /** The file's absolute path, as the tool call named it (a relative one joined to the working directory); absent in older state. */
+  abs?: string
 }
 
 /** One step of the interaction process, for the web view's particles. */
@@ -143,6 +145,18 @@ export type CrewEvent = {
 export type Parents = Record<string, string>
 
 export type Web = { isOn: boolean; dir: string; lastWriteAt: number }
+
+/** What the desktop pet asked the Crew pane to show (overlay/main.js writes it to pet-inbox.json). */
+export type PetFocus = {
+  kind: 'file'
+  abs: string
+  path: string
+  /** The pet's heuristic summary of the file, when it made one. */
+  summary: { title: string; lead: string; heads: string[]; decls: string[] } | null
+  /** The file's first lines, when there is no summary. */
+  head: string[]
+  at: number
+}
 
 /** The in-pane 3D view: on, its raster size in cells, and what went wrong if anything. */
 export type View3d = { isOn: boolean; cols: number; rows: number; status: string }
@@ -170,6 +184,10 @@ declare module 'claude-code' {
       autoOpened: boolean
       web: Web
       view3d: View3d
+      /** The file the desktop pet asked the pane to show; null when none or closed. */
+      petFocus: PetFocus | null
+      /** The session's first prompt, shortened: the name on the desktop pet's nameplate. */
+      sessionTitle: string
       /** How many rows the pane's tree has, as the engine last measured it; 0 until measured. */
       paneRows: number
     }

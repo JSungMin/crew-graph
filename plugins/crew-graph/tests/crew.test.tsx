@@ -4,8 +4,10 @@ import { expect, mock, test } from 'claude-code/testing'
 import { bigFrame, miniFrame } from '../hooks/clawd'
 import { toEvent } from '../hooks/input3d'
 import { encodeCells, inkOf } from '../bin/cells.mjs'
-import { clip, describeCall, kindOf, pushEvent, scrollbar, snapshotOf, touchFile } from '../hooks/crew'
-import { DEFAULT_ARCHITECT, DEFAULT_GATE, DEFAULT_MAIN, DEFAULT_TURN, DEFAULT_USAGE, normalizeCard } from '../hooks/deck/core'
+import { absPath, clip, describeCall, kindOf, pushEvent, scrollbar, snapshotOf, titleOf, touchFile } from '../hooks/crew'
+import { DEFAULT_ARCHITECT, DEFAULT_GATE, DEFAULT_MAIN, DEFAULT_TURN, DEFAULT_USAGE, normalizeCard, parseConfig } from '../hooks/deck/core'
+import { allowedFiles, isOpenable, makeActions, norm, parseDataJs } from '../overlay/actions.mjs'
+import { summarize, summarizeFile } from '../overlay/summary.mjs'
 
 // ---------------------------------------------------------------- pure behaviour
 
@@ -178,6 +180,17 @@ test('/crew web copies the viewer and writes data.js for the browser', async ($,
   const snap = JSON.parse(data.slice(data.indexOf('(', 30) + 1, data.lastIndexOf(')')))
   expect(snap.agents[0].id).toBe('main')
   expect(snap.events.some((x: { kind: string }) => x.kind === 'prompt')).toBe(true)
+  // The session's first prompt names it; every session also gets its own file for the desktop pet windows.
+  expect(snap.session.title).toBe('go')
+  const own = [...written].find(([k]) => k.replace(/\\/g, '/') === 'C:/Users/me/.claude/crew-graph/sessions/sess-1.js')?.[1]
+  expect(own).toBe(data)
+})
+
+test('a session title is its first prompt on one line, shortened, credentials masked', () => {
+  expect(titleOf('  Refactor\nthe   loader\t please ')).toBe('Refactor the loader please')
+  expect(titleOf('x'.repeat(80)).length).toBeLessThanOrEqual(32)
+  expect(titleOf('use curl -H "Authorization: Bearer abcdefgh12345678" now')).not.toContain('abcdefgh')
+  expect(titleOf('설정 로더를 고치고 문서도 같이 정리해서 올려줘 그리고 또')).toContain('…')
 })
 
 test('/crew 3d streams the renderer frames into the pane raster', async ($, on) => {
@@ -290,4 +303,242 @@ test('a docked pane taller than its window draws a scrollbar once the tree is me
   const after = await $.ui.mount({ ...short, surface: 'terminal' })
   expect(await after.find({ text: /┃/ })).toBeDefined()
   await after.unmount()
+})
+
+// ---------------------------------------------------------------- desktop pet
+
+const ok = { exitCode: 0, stdout: 'ok 4242', stderr: '', isStdoutTruncated: false, isStderrTruncated: false }
+// The host spells paths its own way (backslashes on Windows).
+const isElectron = (p: string) => p.replace(/\\/g, '/').endsWith('node_modules/electron/dist/electron.exe')
+
+test('/crew pet starts the overlay through launch.mjs and says how to use it', async ($, on) => {
+  engine(on)
+  const runs: { argv: readonly string[]; cwd?: string }[] = []
+  on('env.get', (_$, e) => ({ value: e.name === 'USERPROFILE' ? 'C:/Users/me' : e.name === 'OS' ? 'Windows_NT' : e.name === 'TERM_PROGRAM' ? 'Orca' : undefined }))
+  on('fs.read', (_$, e) => ({ value: `// ${e.path}` }))
+  on('fs.write', () => ({ value: undefined }))
+  on('fs.exists', (_$, e) => ({ value: isElectron(e.path) }))
+  on('process.run', (_$, e) => {
+    runs.push({ argv: e.argv, cwd: e.init?.cwd })
+    return { value: ok }
+  })
+  on('session.id', () => ({ value: 'sess-p1' }))
+  const { text } = await $.command.run({ command: 'crew', args: 'pet' } as never)
+  const launch = runs.find(r => /overlay[/\\]launch\.mjs$/.test(r.argv[1] ?? ''))
+  expect(launch?.argv[0]).toBe('node')
+  const a = launch?.argv ?? []
+  const main = a[a.indexOf('--main') + 1] ?? ''
+  expect(a.slice(2)).toEqual([
+    '--electron',
+    'C:/Users/me/.claude/crew-graph/overlay-runtime/node_modules/electron/dist/electron.exe',
+    '--main',
+    main,
+    '--page',
+    'C:/Users/me/.claude/crew-graph/index.html',
+    '--state',
+    'C:/Users/me/.claude/crew-graph/overlay',
+    '--session',
+    'sess-p1',
+    '--orca',
+  ])
+  expect(main).toMatch(/overlay[/\\]main\.js$/)
+  // Electron was there: no npm.
+  expect(runs.some(r => r.argv.includes('npm'))).toBe(false)
+  for (const w of ['carry', 'pinch', 'pet', 'rotate', 'zoom', 'resize', 'menu', '/crew pet off']) expect(text).toContain(w)
+})
+
+test('/crew pet without Electron installs it into the runtime folder first, then starts', async ($, on) => {
+  const clock = engine(on)
+  const runs: { argv: readonly string[]; cwd?: string; timeoutMs?: number }[] = []
+  const written: string[] = []
+  let installed = false
+  on('env.get', (_$, e) => ({ value: e.name === 'USERPROFILE' ? 'C:/Users/me' : e.name === 'OS' ? 'Windows_NT' : undefined }))
+  on('fs.read', (_$, e) => ({ value: `// ${e.path}` }))
+  on('fs.write', (_$, e) => {
+    written.push(e.path.replace(/\\/g, '/'))
+    return { value: undefined }
+  })
+  on('fs.exists', (_$, e) => ({ value: installed && isElectron(e.path) }))
+  on('process.run', (_$, e) => {
+    runs.push({ argv: e.argv, cwd: e.init?.cwd, timeoutMs: e.init?.timeoutMs })
+    if (e.argv[1] === 'node_modules/electron/install.js') installed = true
+    return { value: ok }
+  })
+  on('session.id', () => ({ value: 'sess-p2' }))
+  const { text } = await $.command.run({ command: 'crew', args: 'pet' } as never)
+  expect(text).toContain('44.4.5')
+  for (let i = 0; i < 40 && !runs.some(r => r.argv[1]?.endsWith('launch.mjs')); i += 1) await clock.advance(10)
+  await clock.advance(10)
+  expect(written.some(w => w === 'C:/Users/me/.claude/crew-graph/overlay-runtime/README.txt')).toBe(true)
+  const npm = runs[0]
+  // process.run has no shell: npm is reached through cmd on Windows.
+  expect(npm?.argv).toEqual(['cmd', '/c', 'npm', 'install', '--no-audit', '--no-fund', '--prefix', '.', 'electron@44.4.5'])
+  expect(npm?.cwd).toBe('C:/Users/me/.claude/crew-graph/overlay-runtime')
+  expect(npm?.timeoutMs).toBe(600_000)
+  expect(runs[1]?.argv).toEqual(['node', 'node_modules/electron/install.js'])
+  expect(runs[2]?.argv[1]).toMatch(/overlay[/\\]launch\.mjs$/)
+})
+
+test('/crew pet off closes the window of this session, /crew pet off all quits the pet', async ($, on) => {
+  engine(on)
+  const runs: (readonly string[])[] = []
+  on('env.get', (_$, e) => ({ value: e.name === 'USERPROFILE' ? '/home/me' : undefined }))
+  on('session.id', () => ({ value: 'sess-p4' }))
+  on('process.run', (_$, e) => {
+    runs.push(e.argv)
+    return { value: ok }
+  })
+  const one = await $.command.run({ command: 'crew', args: 'pet off' } as never)
+  expect(one.text).toContain('window closed')
+  expect(runs.length).toBe(1)
+  expect(runs[0]?.[0]).toBe('node')
+  expect(runs[0]?.[1]).toMatch(/overlay[/\\]launch\.mjs$/)
+  expect(runs[0]?.slice(2)).toEqual(['--state', '/home/me/.claude/crew-graph/overlay', '--close', 'sess-p4'])
+  const all = await $.command.run({ command: 'crew', args: 'pet off all' } as never)
+  expect(all.text).toContain('every window')
+  expect(runs[1]?.slice(2)).toEqual(['--state', '/home/me/.claude/crew-graph/overlay', '--quit'])
+})
+
+test('a "show in Crew pane" request from the pet opens a focus panel for a file the crew touched', async ($, on) => {
+  const clock = engine(on)
+  let inbox = ''
+  on('env.get', (_$, e) => ({ value: e.name === 'USERPROFILE' ? 'C:/Users/me' : e.name === 'OS' ? 'Windows_NT' : undefined }))
+  on('fs.read', (_$, e) => ({ value: e.path.endsWith('pet-inbox-sess-p3.json') ? inbox : `// ${e.path}` }))
+  on('fs.write', () => ({ value: undefined }))
+  on('fs.exists', (_$, e) => ({ value: /electron\.exe$/.test(e.path) }))
+  on('process.run', () => ({ value: ok }))
+  on('session.id', () => ({ value: 'sess-p3' }))
+  await $.turn.start({ text: 'go', turnId: 'F1' })
+  await $.tool.call({ tool: 'Read', file_path: 'C:/w/src/focus-me.ts' })
+  await $.command.run({ command: 'crew', args: 'pet' } as never)
+  const summary = { title: 'Focus title', lead: 'what this file is for', heads: [], decls: ['alpha', 'beta'] }
+  const at = Number.MAX_SAFE_INTEGER
+  // A file the crew never touched is ignored.
+  inbox = JSON.stringify({ seq: 90001, at, kind: 'focus-file', abs: 'C:/elsewhere/secret.txt', path: 'secret.txt', summary })
+  await clock.advance(1100)
+  const none = await $.ui.mount({ ...pane(70), surface: 'terminal' })
+  expect(await none.find({ text: /secret\.txt/ })).toBeUndefined()
+  await none.unmount()
+  inbox = JSON.stringify({ seq: 90002, at, kind: 'focus-file', abs: 'C:/w/src/focus-me.ts', path: 'focus-me.ts', summary })
+  await clock.advance(1100)
+  const shown = await $.ui.mount({ ...pane(70), surface: 'terminal' })
+  expect(await shown.find({ text: /focus .*focus-me\.ts/ })).toBeDefined()
+  expect(await shown.find({ text: /Focus title/ })).toBeDefined()
+  expect(await shown.find({ text: /alpha . beta/ })).toBeDefined()
+  await shown.unmount()
+  await $.command.run({ command: 'crew', args: 'pet off' } as never)
+})
+
+test('FileNode carries the absolute path, relative ones taken from the working directory', () => {
+  expect(absPath('C:\\w\\a.ts', '')).toBe('C:/w/a.ts')
+  expect(absPath('src/a.ts', 'C:\\w\\proj\\')).toBe('C:/w/proj/src/a.ts')
+  expect(absPath('/home/me/a.ts', '/x')).toBe('/home/me/a.ts')
+  expect(absPath('a.ts', '')).toBeUndefined()
+  const list = touchFile([], 'src/a.ts', 'main', 'r', 1, 'C:/w/src/a.ts')
+  expect(list[0]?.abs).toBe('C:/w/src/a.ts')
+  // Touching it again without a path keeps the one it had; older state without one stays valid.
+  expect(touchFile(list, 'src/a.ts', 'main', 'w', 2)[0]?.abs).toBe('C:/w/src/a.ts')
+  expect(touchFile([], 'b.ts', 'main', 'r', 1)[0]).not.toHaveProperty('abs')
+})
+
+test('petOnStart is off unless the config turns it on', () => {
+  expect(parseConfig({}).petOnStart).toBe(false)
+  expect(parseConfig({ petOnStart: true }).petOnStart).toBe(true)
+  expect(parseConfig({ petOnStart: 'yes' }).petOnStart).toBe(false)
+})
+
+test('a markdown file is summarized by its title, first paragraph and headings', () => {
+  const md = ['---', 'tag: x', '---', '# The **Crew** guide', '', 'First line of the', 'intro paragraph, with a [link](http://x).', '', '## Install', 'text', '```', '# not a heading', '```', '## Use', '### Deep', '#### d4', '##### d5', '###### d6', '## Last'].join('\n')
+  const s = summarize(md, 'docs/guide.md')
+  expect(s.kind).toBe('doc')
+  expect(s.title).toBe('The Crew guide')
+  expect(s.lead).toBe('First line of the intro paragraph, with a link.')
+  expect(s.heads).toEqual(['Install', 'Use', 'Deep', 'd4', 'd5', 'd6'])
+  // No heading: the first line is the title.
+  expect(summarize('plain notes\n\nmore', 'a.txt').title).toBe('plain notes')
+  // A long paragraph is cut near 200 characters.
+  expect(summarize('# T\n\n' + 'word '.repeat(100), 'a.md').lead.length).toBeLessThanOrEqual(200)
+})
+
+test('a source file is summarized by its leading comment and its top-level declarations', () => {
+  const ts = ['// Pure helpers for the crew.', '// Nothing here touches the engine.', 'import x from "y"', 'export function kindOf(p: string) {', '  function inner() {}', '}', 'export const MAX = 3', 'export class Box {}', 'interface Shape {}', 'type Id = string'].join('\n')
+  const s = summarize(ts, 'hooks/crew.ts')
+  expect(s.kind).toBe('code')
+  expect(s.lead).toBe('Pure helpers for the crew. Nothing here touches the engine.')
+  expect(s.decls).toEqual(['kindOf', 'MAX', 'Box', 'Shape', 'Id'])
+  const py = ['#!/usr/bin/env python', '"""Tools for the thing."""', 'def run(): pass', 'class Job: pass'].join('\n')
+  expect(summarize(py, 'x.py')).toMatchObject({ lead: 'Tools for the thing.', decls: ['run', 'Job'] })
+  const many = Array.from({ length: 20 }, (_, i) => `function f${i}() {}`).join('\n')
+  expect(summarize(many, 'a.js').decls.length).toBe(8)
+})
+
+test('summarizeFile reads at most 64 KB and refuses what is not a regular file', () => {
+  let asked = 0
+  const fs = {
+    openSync: () => 7,
+    fstatSync: () => ({ isFile: () => true, size: 500_000, mtimeMs: 5 }),
+    readSync: (_fd: number, buf: Uint8Array, _o: number, len: number) => {
+      asked = len
+      buf.fill(97)
+      return len
+    },
+    closeSync: () => undefined,
+  }
+  const s = summarizeFile('big.md', fs)
+  expect(asked).toBe(64 * 1024)
+  expect(s).toMatchObject({ kind: 'doc', truncated: true })
+  const dir = { ...fs, fstatSync: () => ({ isFile: () => false, size: 0, mtimeMs: 0 }) }
+  expect(summarizeFile('somewhere', dir)).toEqual({ error: 'not a regular file' })
+})
+
+test('the pet opens or reveals only paths the snapshot lists, and only safe types are opened', async () => {
+  const snap = { files: [{ path: 'a.md', abs: 'C:/Work/Notes/a.md' }, { path: 'run.bat', abs: 'C:/Work/run.bat' }, { path: 'no.txt' }] }
+  const text = `window.__crewUpdate && window.__crewUpdate(${JSON.stringify(snap)});\n`
+  expect(parseDataJs(text)).toEqual(snap)
+  expect(parseDataJs('garbage')).toBeNull()
+  const files = allowedFiles(parseDataJs(text), 'win32')
+  expect([...files.keys()]).toEqual(['c:/work/notes/a.md', 'c:/work/run.bat'])
+  expect(norm('relative/a.md', 'win32')).toBeNull()
+  expect(norm('C:\\Work\\Notes\\..\\Notes\\A.MD', 'win32')).toBe('c:/work/notes/a.md')
+  const calls: string[] = []
+  const make = (orca: boolean, orcaWorks = true) =>
+    makeActions({
+      shell: {
+        openPath: (p: string) => {
+          calls.push(`open ${p}`)
+          return ''
+        },
+        showItemInFolder: (p: string) => void calls.push(`reveal ${p}`),
+      },
+      execFile: (file, args, _opts, cb) => {
+        calls.push(`${file} ${args.join(' ')}`)
+        cb(orcaWorks ? null : new Error('no orca'))
+      },
+      files: () => files,
+      platform: 'win32',
+      orca,
+      isFile: () => true,
+    })
+  // Listed: Orca first, with --focus, an absolute path and no shell.
+  expect(await make(true).open('c:\\work\\notes\\a.md')).toBe('orca')
+  expect(calls).toEqual(['orca file open C:/Work/Notes/a.md --focus'])
+  // Orca missing or failing: the OS opens it.
+  calls.length = 0
+  expect(await make(true, false).open('C:/Work/Notes/a.md')).toBe('shell')
+  expect(calls).toEqual(['orca file open C:/Work/Notes/a.md --focus', 'open C:/Work/Notes/a.md'])
+  // Not launched from Orca: straight to the OS.
+  calls.length = 0
+  expect(await make(false).open('C:/Work/Notes/a.md')).toBe('shell')
+  // A program is never run: it is shown in the folder.
+  calls.length = 0
+  expect(await make(false).open('C:/Work/run.bat')).toBe('reveal')
+  expect(calls).toEqual(['reveal C:/Work/run.bat'])
+  expect(isOpenable('x.md') && isOpenable('y.TS') && !isOpenable('z.exe') && !isOpenable('noext')).toBe(true)
+  // Anything the snapshot does not list is refused outright, whatever the spelling.
+  calls.length = 0
+  expect(await make(true).open('C:/Windows/system32/cmd.exe')).toBe('denied')
+  expect(await make(true).reveal('C:/Work/Notes/../../Windows/notepad.exe')).toBe('denied')
+  expect(await make(true).open('../a.md')).toBe('denied')
+  expect(calls).toEqual([])
+  expect(await make(true).reveal('C:/Work/Notes/a.md')).toBe('reveal')
 })

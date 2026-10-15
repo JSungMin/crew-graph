@@ -1,13 +1,14 @@
 # crew-graph web view — data contract
 
-The mod writes three files into `~/.claude/crew-graph/`:
+The mod writes these files into `~/.claude/crew-graph/`:
 
 | File | Who writes it | What it is |
 | --- | --- | --- |
-| `index.html`, `app.js`, `three.min.js` | Copied by the mod from `plugins/crew-graph/web/` on `/crew web`. | The viewer itself. |
-| `data.js` | Rewritten by the mod about every 500 ms while work runs, and once more after the work stops. | The live state. |
+| `index.html`, `app.js`, `three.min.js` | Copied by the mod from `plugins/crew-graph/web/` on `/crew web` and `/crew pet`. | The viewer itself. |
+| `data.js` | Rewritten by the mod about every 500 ms while work runs, and once more after the work stops. Whichever session wrote last wins. | The live state, for `/crew web`. |
+| `sessions/<session id>.js` | Written with every `data.js`, with the same content, by the session it is named for. | That session's own live state. The desktop pet (`index.html?overlay&session=<id>`) reads this, one window per session. |
 
-The page runs from `file://` without a server and makes no network requests. It cannot `fetch` JSON under `file://`, so it polls by adding a `<script src="data.js?t=<now>">` tag about every 500 ms. That script calls the global hook:
+The page runs from `file://` without a server and makes no network requests. It cannot `fetch` JSON under `file://`, so it polls by adding a `<script src="data.js?t=<now>">` tag about every 500 ms (the pet: `sessions/<id>.js`, once a second). That script calls the global hook:
 
 ```js
 window.__crewUpdate({ ...snapshot })
@@ -21,7 +22,9 @@ type Snapshot = {
   now: number                 // ms epoch at write time
   session: {
     id: string
-    cwd: string               // basename only (never a full path)
+    cwd: string               // basename of the session folder
+    cwdAbs?: string           // the full path, forward slashes (optional: older data has none)
+    title?: string            // the session's first prompt on one line, credentials masked, about 32 cells (optional)
     model: string             // e.g. "claude-opus-5-5"
     effort?: string
     mode?: string             // permission mode
@@ -63,6 +66,7 @@ type Agent = {
 
 type FileNode = {
   path: string                // relative to cwd, shortened
+  abs?: string                // the absolute path, forward slashes (optional: older data has none). The desktop pet opens and summarizes only paths listed here.
   kind: 'plan' | 'doc' | 'code'
   by: Record<string, 'r' | 'w' | 'rw'>   // agent id -> what it did
   last: number
@@ -82,9 +86,9 @@ type CrewEvent = {
 ## How the viewer animates it
 
 - **Agents** are voxel Clawd crabs, arranged as a tree with main at the root. Their status and verb drive the pose.
-- **Files** float near the agents that touch them: plans are purple cubes, docs are yellow sheets, code is grey chips.
-- **Edges:** agent→child edges are solid; agent→file edges are blue for read and orange for write.
-- **Events** become particles that travel along an edge:
+- **Files** gather beside the agent that touched them last (the newest five in an arc, `+N` for the rest): plans are purple cubes, docs are yellow sheets, code is grey chips.
+- **Links:** an agent→child link is one smooth tube in the child's colour, with dashes running along it while the child works. There are no standing agent→file lines: a read (blue) or write (orange) event draws a short arc that fades in about 1.5 s, and hovering a node lights its related lines and dims the rest.
+- **Events** become particles that travel along a link:
   - `spawn`: parent→child
   - `answer` / `done`: child→parent
   - `read`: file→agent

@@ -3,7 +3,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { AgentCard, Architect, Bucket, Check, CrewEvent, FileNode, Gate, Layout, LogLine, Loop, LoopAct, Main, Roster, Turn, Usage, Verb, View, View3d, Web } from '../types'
+import type { AgentCard, Architect, Bucket, Check, CrewEvent, FileNode, Gate, Layout, LogLine, Loop, LoopAct, Main, Roster, Turn, Usage, Verb, View, View3d, Web, PetFocus } from '../types'
 import {
   DEFAULT_ARCHITECT,
   DEFAULT_GATE,
@@ -63,7 +63,7 @@ import {
 } from './deck/core'
 import type { Config, Panel } from './deck/core'
 import { bigFrame, miniFrame, propFrame } from './clawd'
-import { clip, dataJs, describeCall, pushEvent, shortPath, snapshotOf, touchFile, verbOfCard, scrollbar } from './crew'
+import { absPath, clip, dataJs, describeCall, titleOf, pushEvent, shortPath, snapshotOf, touchFile, verbOfCard, scrollbar } from './crew'
 
 const PANE = 'crew-graph'
 const TITLE = 'Crew'
@@ -93,6 +93,8 @@ const parents = atom({ plugin: 'crew-graph', key: 'parents' } as const, {})
 const autoOpened = atom({ plugin: 'crew-graph', key: 'autoOpened' } as const, false)
 const web = atom({ plugin: 'crew-graph', key: 'web' } as const, { isOn: false, dir: '', lastWriteAt: 0 })
 const view3d = atom({ plugin: 'crew-graph', key: 'view3d' } as const, { isOn: false, cols: 0, rows: 0, status: '' })
+const petFocus = atom({ plugin: 'crew-graph', key: 'petFocus' } as const, null)
+const sessionTitle = atom({ plugin: 'crew-graph', key: 'sessionTitle' } as const, '')
 const paneRows = atom({ plugin: 'crew-graph', key: 'paneRows' } as const, 0)
 
 type ServerBlock = { type: string; id?: string; name?: string; tool_use_id?: string }
@@ -216,6 +218,7 @@ async function resetAll($: EngineInterface) {
   await update($, files, () => [])
   await update($, events, () => [])
   await update($, parents, () => ({}))
+  await update($, sessionTitle, () => '')
   // The context gauge waits for the next measurement rather than showing the pre-clear fill.
   await update($, usage, x => ({ ...normalize(DEFAULT_USAGE, x), pct: null, tokens: null }))
 }
@@ -287,7 +290,7 @@ async function flushWeb($: EngineInterface) {
 async function writeWeb($: EngineInterface) {
   const w = await getWeb($)
   if (!w.isOn || !w.dir) return
-  const [m, u, a, g, cards, t, r, ac, fl, ev, pa, now, sid] = await Promise.all([
+  const [m, u, a, g, cards, t, r, ac, fl, ev, pa, now, sid, title] = await Promise.all([
     getMain($),
     getUsage($),
     getArchitect($),
@@ -301,10 +304,12 @@ async function writeWeb($: EngineInterface) {
     getParents($),
     $.clock.now(),
     $.session.id().catch(() => ''),
+    read($, sessionTitle),
   ])
   const snap = snapshotOf({
     now,
     sessionId: String(sid),
+    title,
     cwd,
     main: m,
     usage: u,
@@ -319,9 +324,15 @@ async function writeWeb($: EngineInterface) {
     turn: t,
     receipt: r,
   })
-  await $.fs.write(`${w.dir}/data.js`, dataJs(snap)).catch(() => undefined)
+  const text = dataJs(snap)
+  await $.fs.write(`${w.dir}/data.js`, text).catch(() => undefined)
+  // The same snapshot under the session's own name: every desktop pet window reads its session's file, data.js is whoever wrote last.
+  if (safeId(String(sid))) await $.fs.write(`${w.dir}/sessions/${sid}.js`, text).catch(() => undefined)
   await update($, web, x => ({ ...normalize(WEB_OFF, x), lastWriteAt: now }))
 }
+
+/** A session id that is fine as a file name (the usual uuid is). */
+const safeId = (id: string) => /^[A-Za-z0-9._-]{1,80}$/.test(id)
 
 async function homeDir($: EngineInterface) {
   return ((await $.env.get('USERPROFILE')) || (await $.env.get('HOME')) || '').replace(/\\/g, '/')
@@ -354,6 +365,223 @@ async function openInBrowser($: EngineInterface, page: string): Promise<string> 
   const argv = isWin ? ['explorer', page.replace(/\//g, '\\')] : [(await $.env.get('XDG_SESSION_TYPE')) ? 'xdg-open' : 'open', page]
   await $.process.run(argv, { timeoutMs: 10_000 }).catch(() => undefined)
   return ''
+}
+
+// ---------------------------------------------------------------- desktop pet
+// overlay/main.js shows the web view in a transparent, always-on-top Electron window on the desktop. The mod
+// cannot hold that process itself ($.process.spawn kills its child with the session), so overlay/launch.mjs starts
+// it detached and returns. Electron lives in ~/.claude/crew-graph/overlay-runtime, not in the plugin folder
+// (an update replaces that), and is installed with npm the first time.
+
+const ELECTRON_VERSION = '44.4.5'
+const PET_POLL_MS = 1000
+
+const PET_HELP = [
+  'Crew pet: the crabs on your desktop, with no background.',
+  '  drag a crab to carry it · click to pinch · stroke it to pet',
+  '  right-drag to rotate · wheel to zoom · Ctrl+wheel or the corner grip to resize',
+  '  click a file to open it · Shift+click shows it in the folder · right-click for the menu',
+  '  the pill on top names this session (folder · first prompt); drag it to carry the window',
+  '/crew pet off closes the window of this session, /crew pet off all every window.',
+].join('\n')
+
+type PetPaths = { dir: string; runtime: string; state: string; page: string; main: string; launch: string; isWin: boolean }
+
+let petInstalling = false
+// The poll of the pet's inbox runs while its generation is the current one; /crew pet off ends it.
+let petGen = 0
+let petSeen = 0
+
+async function petPaths($: EngineInterface): Promise<PetPaths | null> {
+  const home = await homeDir($)
+  if (!home) return null
+  const dir = `${home}/.claude/crew-graph`
+  return {
+    dir,
+    runtime: `${dir}/overlay-runtime`,
+    state: `${dir}/overlay`,
+    page: `${dir}/index.html`,
+    main: `${$.plugin.root}/overlay/main.js`,
+    launch: `${$.plugin.root}/overlay/launch.mjs`,
+    isWin: (await $.env.get('OS')) === 'Windows_NT',
+  }
+}
+
+/** The Electron binary npm unpacked, if it is there: electron.exe, Electron.app on a Mac, else the bare binary. */
+async function petElectron($: EngineInterface, p: PetPaths): Promise<string | null> {
+  const base = `${p.runtime}/node_modules/electron/dist`
+  const found = p.isWin
+    ? [`${base}/electron.exe`]
+    : [`${base}/Electron.app/Contents/MacOS/Electron`, `${base}/electron`]
+  for (const f of found) if (await $.fs.exists(f).catch(() => false)) return f
+  return null
+}
+
+const tailOf = (text: string) => text.trim().split('\n').slice(-6).join('\n').slice(-400)
+
+type RunResult = { exitCode: number; stdout: string; stderr: string }
+async function runOrFail($: EngineInterface, argv: readonly string[], cwd: string | undefined, timeoutMs: number): Promise<RunResult> {
+  try {
+    const r = await $.process.run(argv, cwd ? { cwd, timeoutMs } : { timeoutMs })
+    return { exitCode: r.exitCode, stdout: r.stdout, stderr: r.stderr }
+  } catch (e) {
+    return { exitCode: 1, stdout: '', stderr: e instanceof Error ? e.message : String(e) }
+  }
+}
+
+/** npm install electron@<pinned> into the runtime folder, then its own binary download (npm leaves that out here). '' when done. */
+async function petInstall($: EngineInterface, p: PetPaths): Promise<string> {
+  // Writing the folder's note makes the folder; npm makes the package.json itself.
+  await $.fs.write(`${p.runtime}/README.txt`, 'Electron for the crew-graph desktop pet (/crew pet). Safe to delete: /crew pet installs it again.\n')
+  // process.run has no shell, and npm is npm.cmd on Windows: go through cmd. --prefix . keeps it in this folder
+  // (without it npm would look for a package.json in the folders above).
+  const npm = p.isWin ? ['cmd', '/c', 'npm'] : ['npm']
+  const got = await runOrFail($, [...npm, 'install', '--no-audit', '--no-fund', '--prefix', '.', `electron@${ELECTRON_VERSION}`], p.runtime, 600_000)
+  if (got.exitCode !== 0) return `npm install electron@${ELECTRON_VERSION} failed: ${tailOf(got.stderr || got.stdout)}`
+  const bin = await runOrFail($, ['node', 'node_modules/electron/install.js'], p.runtime, 600_000)
+  if (bin.exitCode !== 0) return `the Electron binary download failed: ${tailOf(bin.stderr || bin.stdout)}`
+  return ''
+}
+
+/** This session's id when it is usable in a file name, else '' (the pet then reads data.js, whoever wrote last). */
+async function petSession($: EngineInterface): Promise<string> {
+  const id = String(await $.session.id().catch(() => ''))
+  return safeId(id) ? id : ''
+}
+
+async function petLaunch($: EngineInterface, p: PetPaths, bin: string): Promise<string> {
+  const isOrca = (await $.env.get('TERM_PROGRAM')) === 'Orca'
+  const sid = await petSession($)
+  const argv = ['node', p.launch, '--electron', bin, '--main', p.main, '--page', p.page, '--state', p.state, ...(sid ? ['--session', sid] : []), ...(isOrca ? ['--orca'] : [])]
+  const res = await runOrFail($, argv, undefined, 20_000)
+  if (res.exitCode !== 0) return `crew pet: could not start it: ${tailOf(res.stdout || res.stderr)}`
+  petWatch($, p, sid)
+  return PET_HELP
+}
+
+async function toast($: EngineInterface, text: string) {
+  try {
+    await $.ui.toast(text)
+  } catch {
+    // a host without toasts just goes without
+  }
+}
+
+async function petNotify($: EngineInterface, text: string) {
+  await toast($, text)
+  await say($, 'crew pet', text).catch(() => undefined)
+}
+
+async function petInstallThenLaunch($: EngineInterface, p: PetPaths) {
+  await toast($, 'crew pet: downloading Electron (about 100 MB), once. It starts when that is done.')
+  const err = await petInstall($, p)
+  if (err) return petNotify($, `crew pet: ${err}`)
+  const bin = await petElectron($, p)
+  if (!bin) return petNotify($, 'crew pet: npm finished but no Electron binary was found')
+  const text = await petLaunch($, p, bin)
+  await petNotify($, text === PET_HELP ? 'crew pet: started' : text)
+}
+
+/** /crew pet: the viewer and its data, Electron, then the window. A first run installs Electron in the background. */
+async function petStart($: EngineInterface): Promise<string> {
+  await startWeb($, false)
+  const p = await petPaths($)
+  if (!p) return 'crew pet: no home directory to keep Electron in.'
+  const bin = await petElectron($, p)
+  if (bin) return petLaunch($, p, bin)
+  if (petInstalling) return 'Electron is still downloading for the pet; it starts when that is done.'
+  petInstalling = true
+  void petInstallThenLaunch($, p)
+    .catch(e => petNotify($, `crew pet: ${e instanceof Error ? e.message : String(e)}`))
+    .finally(() => {
+      petInstalling = false
+    })
+  return `Installing Electron ${ELECTRON_VERSION} (about 100 MB) for the pet, once, in ${p.runtime}. It starts when that is done.`
+}
+
+/** /crew pet off closes this session's window, /crew pet off all quits the pet with every window. */
+async function petStop($: EngineInterface, all: boolean): Promise<string> {
+  petGen += 1
+  const p = await petPaths($)
+  if (!p) return 'crew pet: no home directory.'
+  const sid = await petSession($)
+  const which = all || !sid ? ['--quit'] : ['--close', sid]
+  const res = await runOrFail($, ['node', p.launch, '--state', p.state, ...which], undefined, 10_000)
+  if (res.exitCode !== 0) return `crew pet: could not ask it to close: ${tailOf(res.stdout || res.stderr)}`
+  return which[0] === '--quit' ? 'Crew pet closed, with every window.' : "Crew pet: this session's window closed."
+}
+
+// The pet's right-click menu can ask the Crew pane to show a file or an agent: it writes <state>/pet-inbox.json
+// and the mod looks at it about once a second while a pet it started is running.
+type PetInbox = {
+  seq?: number
+  at?: number
+  kind?: string
+  abs?: string
+  path?: string
+  id?: string
+  summary?: { title?: string; lead?: string; heads?: string[]; decls?: string[]; error?: string }
+}
+
+function petWatch($: EngineInterface, p: PetPaths, sid: string) {
+  petGen += 1
+  const gen = petGen
+  const inbox = `${p.state}/${sid ? `pet-inbox-${sid}.json` : 'pet-inbox.json'}`
+  void $.clock
+    .now()
+    .then(startedAt => petPoll($, gen, inbox, startedAt))
+    .catch(() => undefined)
+}
+
+async function petPoll($: EngineInterface, gen: number, inbox: string, startedAt: number) {
+  if (gen !== petGen) return
+  const text = await $.fs.read(inbox).catch(() => null)
+  if (typeof text === 'string') {
+    let msg: PetInbox | null = null
+    try {
+      msg = JSON.parse(text) as PetInbox
+    } catch {
+      msg = null
+    }
+    // Requests from before this pet started are not ours; one seq is acted on once.
+    if (msg && typeof msg.seq === 'number' && msg.seq !== petSeen && (msg.at ?? 0) >= startedAt) {
+      petSeen = msg.seq
+      await petInbox($, msg).catch(() => undefined)
+    }
+  }
+  if (gen === petGen) $.clock.after(PET_POLL_MS, () => void petPoll($, gen, inbox, startedAt))
+}
+
+const FOCUS_LINES = 12
+
+async function petInbox($: EngineInterface, msg: PetInbox) {
+  if (msg.kind === 'focus-agent' && typeof msg.id === 'string') {
+    const id = msg.id
+    if ((await getCards($)).some(c => c.id === id)) await update($, view, x => ({ ...normalize(DEFAULT_VIEW, x), expanded: id }))
+    await openPane($)
+    return
+  }
+  if (msg.kind !== 'focus-file' || typeof msg.abs !== 'string') return
+  const abs = msg.abs
+  // Only a file the crew itself touched: the inbox is a file anyone could write.
+  const touched = (await getFiles($)).find(n => n.abs === abs)
+  if (!touched) return
+  const s = msg.summary
+  const hasSummary = !!s && !s.error && (!!s.title || !!s.lead || !!s.heads?.length || !!s.decls?.length)
+  let head: string[] = []
+  if (!hasSummary) {
+    const text = await $.fs.read(abs).catch(() => null)
+    if (typeof text === 'string') head = text.split('\n').slice(0, FOCUS_LINES).map(l => clip(l.replace(/[\r\t]+/g, ' '), 100))
+  }
+  await update($, petFocus, () => ({
+    kind: 'file' as const,
+    abs,
+    path: touched.path,
+    summary: hasSummary && s ? { title: s.title ?? '', lead: s.lead ?? '', heads: s.heads ?? [], decls: s.decls ?? [] } : null,
+    head,
+    at: msg.at ?? 0,
+  }))
+  await openPane($)
 }
 
 // ---------------------------------------------------------------- 3d view in the pane
@@ -560,12 +788,14 @@ export const register: Register = (on, options) => {
   on('session.start', async ($, e, next) => {
     await $.command.register({
       name: 'crew',
-      description: 'Crew: the live agent dashboard with Clawd crabs; open, close, reset, layout, or the 3D web view',
-      argumentHint: '[open|close|reset|layout auto|compact|wide|mini|web [off|noopen]|3d [off]]',
+      description: 'Crew: the live agent dashboard with Clawd crabs; open, close, reset, layout, the 3D web view, or the desktop pet',
+      argumentHint: '[open|close|reset|layout auto|compact|wide|mini|web [off|noopen]|3d [off]|pet [off]]',
     })
     await migrate($)
     cwd = String((e as { cwd?: string }).cwd ?? '')
     if (cfg.webOnStart) await startWeb($, false).catch(() => undefined)
+    // Never awaited: a first start downloads Electron.
+    if (cfg.petOnStart) void petStart($).catch(() => undefined)
     // A host without usage (headless, an SDK host, a session not yet bound) just starts without it.
     const u = await $.session.usage().catch(() => null)
     if (u) {
@@ -592,7 +822,7 @@ export const register: Register = (on, options) => {
   })
 
   on('command.run', { command: 'crew' }, async ($, e) => {
-    const [verb = 'open', arg = ''] = e.args.trim().split(/\s+/)
+    const [verb = 'open', arg = '', ...rest] = e.args.trim().split(/\s+/)
     if (verb === '3d') {
       if (arg === 'off') {
         await stop3d($)
@@ -602,6 +832,7 @@ export const register: Register = (on, options) => {
       const cols = Math.max(20, Math.min(240, Number(arg) || cfg.view3dColumns - 2))
       return { text: await start3d($, cols, cfg.view3dRows, cfg.view3dFps, cfg.view3dMode) }
     }
+    if (verb === 'pet') return { text: arg === 'off' ? await petStop($, rest[0] === 'all') : await petStart($) }
     if (verb === 'web') {
       if (arg === 'off') {
         await update($, web, x => ({ ...normalize(WEB_OFF, x), isOn: false }))
@@ -652,6 +883,8 @@ export const register: Register = (on, options) => {
     await update($, main, m => ({ ...normalize(DEFAULT_MAIN, m), isRunning: true }))
     await act($, 'main', 'think', '', '')
     if (e.text) await emit($, { kind: 'prompt', from: 'main', text: shorten(promptLine(e.text).text, 60) })
+    // The first prompt of the session names it on the desktop pet's nameplate.
+    if (e.text && promptLine(e.text).who === 'you' && !(await read($, sessionTitle))) await update($, sessionTitle, () => titleOf(e.text ?? ''))
     // A background architect's report reaches the main loop as the text opening this turn. The
     // SubagentHandback tool call (in tool.call) normally carries it first; this is the fallback.
     const back = e.text ? handbackOf(e.text) : null
@@ -763,8 +996,9 @@ export const register: Register = (on, options) => {
       if (touch.file && touch.op) {
         const path = shortPath(touch.file, cwd)
         const op = touch.op
+        const abs = absPath(touch.file, cwd)
         const now = await $.clock.now()
-        await update($, files, list => touchFile(listOf<FileNode>(list), path, key, op, now))
+        await update($, files, list => touchFile(listOf<FileNode>(list), path, key, op, now, abs))
         await emit($, { kind: op === 'r' ? 'read' : 'write', from: key, to: path, tool: String(e.tool), text: path })
       } else if (e.tool !== 'Agent') {
         await emit($, { kind: 'tool', from: key, tool: String(e.tool), text: `${e.tool} ${touch.target}`.trim() })
@@ -968,7 +1202,7 @@ export const register: Register = (on, options) => {
       getView($),
       $.clock.now(),
     ])
-    const [ac, fl, pa, v3] = await Promise.all([getActs($), getFiles($), getParents($), getView3d($)])
+    const [ac, fl, pa, v3, pf] = await Promise.all([getActs($), getFiles($), getParents($), getView3d($), read($, petFocus)])
     // Docked, the last column is the scrollbar's.
     const isDock = e.props.placement === 'dock'
     const W = Math.max(40, e.props.bodyColumns - (isDock ? 1 : 0))
@@ -1304,6 +1538,53 @@ export const register: Register = (on, options) => {
         </Box>
       ) : null
 
+    // ---- the file the desktop pet asked to show: its path, who touched it, a summary or its first lines
+    const focusRows = pf ? 3 + (pf.summary ? 3 : Math.min(pf.head.length, 12)) : 0
+    const focusPanel = (w: number) => {
+      if (!pf) return null
+      const node = fl.find(n => n.abs === pf.abs)
+      const who = node
+        ? Object.entries(node.by)
+            .map(([k, op]) => `${k === 'main' ? 'main' : (cards.find(c => c.id === k)?.type ?? k)} ${op === 'r' ? 'read' : op === 'w' ? 'wrote' : 'read+wrote'}`)
+            .join(' · ')
+        : ''
+      const s = pf.summary
+      return (
+        <Box flexDirection="column" borderStyle="round" borderColor={C.main} paddingX={1} width={w}>
+          <Box justifyContent="space-between" width={w - 4}>
+            <Text bold wrap="truncate">
+              {`focus · ${pf.path}`}
+            </Text>
+            <Button key="focus-close" plain label="✕ close" onPress={() => update($, petFocus, () => null)} />
+          </Box>
+          {who ? (
+            <Text dimColor wrap="truncate">
+              {who}
+            </Text>
+          ) : null}
+          {s?.title ? <Text bold wrap="truncate">{s.title}</Text> : null}
+          {s?.lead ? <Text wrap="wrap">{s.lead}</Text> : null}
+          {s && s.heads.length > 0 ? (
+            <Text dimColor wrap="truncate">
+              {s.heads.map(h => `# ${h}`).join('  ')}
+            </Text>
+          ) : null}
+          {s && s.decls.length > 0 ? (
+            <Text dimColor wrap="truncate">
+              {s.decls.join(' · ')}
+            </Text>
+          ) : null}
+          {!s
+            ? pf.head.map(l => (
+                <Text dimColor wrap="truncate">
+                  {l}
+                </Text>
+              ))
+            : null}
+        </Box>
+      )
+    }
+
     // ---- other loops (workflow agents, forks): ids that match no card
     const loopsPanel = (w: number) => {
       if (lp.length === 0) return null
@@ -1493,7 +1774,7 @@ export const register: Register = (on, options) => {
 
     // ---- log: whatever rows the other panels leave, 4 to 8
     // The main box's speed line and the gap above the log are a row each.
-    const used = 2 + 5 + (m.speed ? 1 : 0) + 1 + (showArchitect ? 6 : 0) + 6 + (v.gateOpen ? 5 : 0) + (cards.length > cfg.maxCards ? 3 + Math.min(6, cards.length) : 8) + (expandedCard ? 8 : 0) + (lp.length ? 1 : 0) + 3
+    const used = 2 + 5 + (m.speed ? 1 : 0) + 1 + (showArchitect ? 6 : 0) + 6 + (v.gateOpen ? 5 : 0) + (cards.length > cfg.maxCards ? 3 + Math.min(6, cards.length) : 8) + (expandedCard ? 8 : 0) + focusRows + (lp.length ? 1 : 0) + 3
     const bodyRows = e.props.scroll?.bodyRows ?? e.viewport?.rows ?? 40
     const nLog = logRows(bodyRows, used)
     const shownLines = (viewed ? lines.filter(l => l.agentId === viewed) : lines).slice(-nLog)
@@ -1676,7 +1957,7 @@ export const register: Register = (on, options) => {
     // The scrollbar: measured again whenever what the tree holds changes shape.
     paneOffset = e.props.scroll?.offset ?? 0
     region3d = v3.isOn && panels[0] === '3d' && !isWide ? { top: 3, rows: v3.rows, cols: v3.cols } : null
-    const sig = [panels.join(','), v3.isOn ? v3.rows : 0, isWide, W, bodyRows, cards.length, expandedCard ?? '', v.gateOpen ?? '', lp.length, showArchitect, shownLines.length, m.speed ? 1 : 0, m.isRunning, !!r].join('|')
+    const sig = [panels.join(','), v3.isOn ? v3.rows : 0, isWide, W, bodyRows, cards.length, expandedCard ?? '', pf?.at ?? 0, v.gateOpen ?? '', lp.length, showArchitect, shownLines.length, m.speed ? 1 : 0, m.isRunning, !!r].join('|')
     if (sig !== paneSig) {
       paneSig = sig
       $.clock.after(80, () => void measurePane($))
@@ -1706,6 +1987,7 @@ export const register: Register = (on, options) => {
             </Text>
           ))}
         </Box>
+        {focusPanel(W)}
         {body}
         {svgLanes}
       </Box>

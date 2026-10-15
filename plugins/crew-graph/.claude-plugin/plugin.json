@@ -1,6 +1,6 @@
 {
   "name": "crew-graph",
-  "version": "0.5.1",
+  "version": "0.6.0",
   "description": "Live agent dashboard with Clawd crabs: model vitals, permission gate, architect, subagent cards, the agent tree and plan/doc graph, and a three.js 3D view of agents interacting, in the pane (/crew 3d) or the browser (/crew web). Absorbs Flightdeck",
   "types": "./types/index.d.ts",
   "author": {
@@ -111,6 +111,12 @@
     "webOnStart": {
       "title": "Web view on start",
       "description": "Start writing the 3D browser view data (~/.claude/crew-graph/data.js) when a session starts; /crew web does it on demand",
+      "type": "boolean",
+      "default": false
+    },
+    "petOnStart": {
+      "title": "Desktop pet on start",
+      "description": "Start the desktop pet (a transparent window with the crabs) when a session starts; /crew pet does it on demand. The first start downloads Electron (about 100 MB)",
       "type": "boolean",
       "default": false
     },
