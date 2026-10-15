@@ -1,0 +1,4 @@
+.claude-plugin/types/
+plugins/*/.claude-plugin/types/
+plugins/*/tsconfig.json
+node_modules/

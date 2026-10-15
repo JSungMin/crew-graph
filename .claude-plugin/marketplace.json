@@ -1,0 +1,24 @@
+{
+  "name": "crew-graph",
+  "owner": {
+    "name": "JSungMin",
+    "url": "https://github.com/JSungMin"
+  },
+  "metadata": {
+    "description": "crew-graph: a Claude Code mod that shows your agent crew at work"
+  },
+  "plugins": [
+    {
+      "name": "crew-graph",
+      "source": "./plugins/crew-graph",
+      "description": "Live pane: agent tree + plan/doc relationship graph, with a little animated critter acting out what each agent is doing",
+      "version": "0.1.1",
+      "category": "productivity",
+      "tags": [
+        "mod",
+        "agents",
+        "visualization"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,20 @@
+{
+  "name": "crew-graph",
+  "version": "0.1.1",
+  "description": "Live pane: agent tree + plan/doc relationship graph, with a little animated critter acting out what each agent is doing",
+  "types": "./types/index.d.ts",
+  "author": {
+    "name": "JSungMin",
+    "url": "https://github.com/JSungMin"
+  },
+  "homepage": "https://github.com/JSungMin/crew-graph",
+  "repository": "https://github.com/JSungMin/crew-graph",
+  "license": "MIT",
+  "keywords": [
+    "claude-code-mod",
+    "agents",
+    "subagents",
+    "visualization",
+    "pane"
+  ]
+}
