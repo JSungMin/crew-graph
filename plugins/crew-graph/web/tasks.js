@@ -34,7 +34,7 @@ function cleanList(raw) {
     if (!d || typeof d !== 'object' || typeof d.id !== 'string' || !d.id || !STATUS[d.status]) continue;
     out.push({
       id: d.id.slice(0, 200),
-      src: d.src === 'task' || d.src === 'agent' ? d.src : 'todo',
+      src: d.src === 'task' || d.src === 'agent' || d.src === 'turn' ? d.src : 'todo',
       owner: typeof d.owner === 'string' && d.owner ? d.owner.slice(0, 200) : null,
       title: typeof d.title === 'string' ? d.title.slice(0, 200) : '',
       active: typeof d.active === 'string' ? d.active.slice(0, 200) : '',
@@ -114,7 +114,7 @@ const STATUS_WORD = { pending: 'waiting', in_progress: 'in progress', completed:
 /* the lines of the hover card: [[text, kind]]; kind 'b' bold, 's' normal, 'p' pale */
 function cardLines(d, ownerName, blocked) {
   const out = [[clipText(d.title || '(untitled)', 90), 'b']];
-  out.push([STATUS_WORD[d.status] + (blocked ? ' · blocked' : '') + (d.src === 'agent' ? ' · subagent' : d.src === 'task' ? ' · task' : ' · to-do'), 's']);
+  out.push([STATUS_WORD[d.status] + (blocked ? ' · blocked' : '') + (d.src === 'agent' ? ' · subagent' : d.src === 'task' ? ' · task' : d.src === 'turn' ? ' · prompt' : ' · to-do'), 's']);
   if (ownerName) out.push([(d.src === 'agent' ? 'agent: ' : 'owner: ') + ownerName, 'p']); else out.push(['nobody has taken it', 'p']);
   if (d.deliverTo && d.src === 'agent') out.push(['hands it to ' + d.deliverTo, 'p']);
   if (d.active && d.status === 'in_progress') out.push(['now: ' + clipText(d.active, 80), 'p']);
@@ -134,14 +134,17 @@ const FOODS = {
   battery: { crumb: '#9bf0b6', boxes: [bx(2.0, 1.1, 0.9, 0, 0, 0, '#5d6877'), bx(0.5, 1.14, 0.94, 0.4, 0, 0, '#5ee08a'), bx(0.35, 0.5, 0.5, 1.2, 0, 0, '#c9ced6'), bx(0.6, 0.2, 0.96, -0.5, 0.2, 0, '#ffd166')] },
   ticket: { crumb: '#f4f1e8', boxes: [bx(2.4, 1.4, 0.12, 0, 0, 0, '#f4f1e8'), bx(0.4, 1.4, 0.14, -1.0, 0, 0, '#7ee0ff'), bx(1.2, 0.12, 0.14, 0.35, 0.35, 0, '#59506b'), bx(1.0, 0.12, 0.14, 0.25, 0, 0, '#59506b'), bx(1.3, 0.12, 0.14, 0.4, -0.35, 0, '#59506b')] },
 };
+/* a prompt turn (src 'turn', proxy food when the model has no task tools): main eats each of the user's prompts as a rice ball, whoever main is */
+const TURN_FOOD = { key: 'riceball', crumb: '#f7f5ee', boxes: [bx(1.7, 1.3, 0.95, 0, -0.1, 0, '#f7f5ee'), bx(1.1, 0.7, 0.95, 0, 0.85, 0, '#f7f5ee'), bx(1.8, 0.55, 1.0, 0, -0.55, 0, '#1f2a24'), bx(0.25, 0.2, 1.0, -0.4, 0.2, 0, '#e3dfd2')] };
 const BUILTIN_FOOD = { crab: 'fish', bunny: 'carrot', cat: 'treat', mochi: 'seed', robot: 'battery' };
 // what each built-in does with its food while it works; any other character just fidgets
 const MOTION_OF = { crab: 'snip', bunny: 'nibble', cat: 'paw', mochi: 'roll', robot: 'hammer' };
 /* the food a character gets: its pack's own (a built-in id or boxes), else the built-in's, else the sunflower seed for a user's pack (a GLB
    has no food of its own); a paper ticket only when nobody holds it (no character) or `setting` says so: 'character' | 'ticket'
-   -> { key, boxes, crumb } */
-function foodFor(charId, def, setting) {
+   -> { key, boxes, crumb }. `src`: the task's source; a prompt turn ('turn') is a rice ball (the paper ticket setting still wins). */
+function foodFor(charId, def, setting, src) {
   if (setting === 'ticket') return { key: 'ticket', boxes: FOODS.ticket.boxes, crumb: FOODS.ticket.crumb };
+  if (src === 'turn') return { key: TURN_FOOD.key, boxes: TURN_FOOD.boxes, crumb: TURN_FOOD.crumb };
   const f = def && def.food;
   if (f && f.boxes && f.boxes.length) return { key: 'own:' + charId, boxes: f.boxes, crumb: f.boxes[0].color === '@base' ? '#dddddd' : f.boxes[0].color };
   if (f && f.id && FOODS[f.id]) return { key: f.id, boxes: FOODS[f.id].boxes, crumb: FOODS[f.id].crumb };
@@ -190,6 +193,8 @@ function demo(h) {
     [9.0, () => { set('b1', 'completed'); set('b2', 'in_progress', { active: 'Translating the guide' }); }],
     [9.5, () => { set('s1', 'completed'); set('s2', 'in_progress', { active: 'Writing the changelog' }); }],
     [11.0, () => { add('t1', 'task', null, 'Review the release notes', 'pending'); add('t2', 'task', null, 'Tag the release', 'pending', { blockedBy: [tid('t1')] }); }],
+    [4.6, () => add('q1', 'turn', 'main', 'Fix the loader and ship the release', 'in_progress', { active: 'working on your prompt' })],
+    [11.0, () => set('q1', 'completed')], // the user's prompt: main eats it as a rice ball
     [12.5, () => { set('m2', 'completed'); set('m3', 'completed'); set('m4', 'completed'); }], // three at once: main eats them one after another from its stack
     [14.0, () => set('b2', 'failed')],
     [15.0, () => set('c2', 'deleted')],
@@ -315,7 +320,7 @@ function create(api) {
   }
   function modelFor(rec, a) {
     const ch = a && a.ch, def = ch && ch.rec && ch.rec.def;
-    const food = foodFor(a ? a.chId : '', def, ps().food);
+    const food = foodFor(a ? a.chId : '', def, ps().food, rec.d.src);
     if (rec.foodKey === food.key && rec.g) return;
     if (rec.g) { world.remove(rec.g); rec.mats.forEach((x) => x.m.dispose()); }
     const m = buildFood(food);
@@ -898,5 +903,5 @@ function create(api) {
   };
 }
 
-return { demo, cleanList, blockedIds, diff, agentFor, eaterId, stackSlot, tableSlot, cardLines, FOODS, BUILTIN_FOOD, MOTION_OF, foodFor, create, SHOWN, EAT, eatSlot, boostFor, foodHeight, eatSize };
+return { demo, cleanList, blockedIds, diff, agentFor, eaterId, stackSlot, tableSlot, cardLines, FOODS, TURN_FOOD, BUILTIN_FOOD, MOTION_OF, foodFor, create, SHOWN, EAT, eatSlot, boostFor, foodHeight, eatSize };
 });

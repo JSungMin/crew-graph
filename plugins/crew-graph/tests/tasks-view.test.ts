@@ -26,7 +26,8 @@ type View = {
   stackSlot(i: number, id: string): { x: number; y: number; z: number; ry: number }
   tableSlot(i: number): { x: number; z: number }
   cardLines(d: Item, owner: string, blocked: boolean): [string, string][]
-  foodFor(charId: string, def: unknown, setting: string): { key: string; boxes: { color: string }[]; crumb: string }
+  TURN_FOOD: { key: string; crumb: string; boxes: { size: number[]; at: number[]; color: string }[] }
+  foodFor(charId: string, def: unknown, setting: string, src?: string): { key: string; boxes: { color: string }[]; crumb: string }
   FOODS: Record<string, { crumb: string; boxes: { size: number[]; at: number[]; color: string }[] }>
   BUILTIN_FOOD: Record<string, string>
   MOTION_OF: Record<string, string>
@@ -164,6 +165,22 @@ test('a user pack without a valid food eats the seed: no food, a bad food, a GLB
   // the foods a pack may name are the foods there are
   expect([...core.FOOD_IDS].sort()).toEqual(Object.keys(view.FOODS).sort())
   expect(core.DEFAULT_FOOD).toBe('seed')
+})
+
+test('a prompt turn is a rice ball for whoever eats it, and the tickets setting still wins; the list keeps src turn', () => {
+  const t = view.foodFor('crab', undefined, 'character', 'turn')
+  expect(t.key).toBe('riceball')
+  expect(t.boxes).toBe(view.TURN_FOOD.boxes)
+  expect(view.foodFor('someone', undefined, 'character', 'turn').key).toBe('riceball') // a user's pack too
+  expect(view.foodFor('crab', undefined, 'ticket', 'turn').key).toBe('ticket')
+  expect(view.foodFor('crab', undefined, 'character', 'todo').key).toBe('fish') // a to-do keeps its own character's food
+  expect(view.foodFor('crab', undefined, 'character').key).toBe('fish')
+  for (const b of view.TURN_FOOD.boxes) expect(b.color).toMatch(/^#[0-9a-f]{6}$/i)
+  expect(view.foodHeight(view.TURN_FOOD.boxes)).toBeGreaterThan(0.5)
+  expect(Object.keys(view.FOODS)).not.toContain('riceball') // not a food a pack may name
+  const l = view.cleanList([{ id: 'turn:q1', src: 'turn', owner: 'main', title: 'fix it', status: 'pending' }, { id: 'x', src: 'weird', title: 'y', status: 'pending' }])
+  expect(l.map(x => x.src)).toEqual(['turn', 'todo'])
+  expect(view.cardLines(l[0] as never, 'main', false)[1]?.[0]).toBe('waiting · prompt')
 })
 
 test('a pack may name a built-in food or bring boxes; a bad food is ignored', () => {
