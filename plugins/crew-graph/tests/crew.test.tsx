@@ -3,6 +3,7 @@ import { expect, mock, test } from 'claude-code/testing'
 
 import { bigFrame, miniFrame } from '../hooks/clawd'
 import { toEvent } from '../hooks/input3d'
+import { encodeCells, inkOf } from '../bin/cells.mjs'
 import { clip, describeCall, kindOf, pushEvent, snapshotOf, touchFile } from '../hooks/crew'
 import { DEFAULT_ARCHITECT, DEFAULT_GATE, DEFAULT_MAIN, DEFAULT_TURN, DEFAULT_USAGE, normalizeCard } from '../hooks/deck/core'
 
@@ -205,7 +206,7 @@ test('/crew 3d streams the renderer frames into the pane raster', async ($, on) 
     return { value: { code: 0, signal: null } }
   })
   const { text } = await $.command.run({ command: 'crew', args: '3d 20' } as never)
-  expect(text).toContain('20x20')
+  expect(text).toContain('20x28')
   // Let the renderer loop drain its pieces.
   for (let i = 0; i < 20 && blits.length < 2; i += 1) await clock.advance(10)
   expect(spawned.some(a => a.endsWith('bin/crew-3d.mjs'))).toBe(true)
@@ -228,4 +229,43 @@ test('pane pointer events become view fractions for the renderer', () => {
   expect(toEvent({ type: 'move', x: 0, y: 0, fine: { x: 5, y: 2.5 } }, 20, 10)).toMatchObject({ kind: 'move', x: 0.25, y: 0.25 })
   expect(toEvent({ type: 'enter', x: 40, y: 0 }, 20, 10)).toMatchObject({ kind: 'move', x: 1 })
   expect(toEvent({ type: 'leave', x: 3, y: 3, shift: true }, 20, 10)).toMatchObject({ kind: 'leave', shift: true })
+})
+
+test('the 3D cells follow an edge to an eighth of the cell and stay within the colour pairs', () => {
+  // One cell, 4x8 pixels: dark above, orange from the fourth row down (the lower 5/8).
+  const rgb = new Uint8Array(4 * 8 * 3)
+  for (let y = 3; y < 8; y += 1) for (let x = 0; x < 4; x += 1) rgb.set([255, 128, 0], (y * 4 + x) * 3)
+  const one = encodeCells(rgb, 1, 1)
+  expect(Array.from(one.cells)).toEqual([0x2585, 0xff8000, 0x000000])
+  expect(inkOf(0x2585)?.length).toBe(20)
+  // The quadrant set can only split it in halves.
+  expect([0x2580, 0x2584]).toContain(encodeCells(rgb, 1, 1, { glyphs: 'quad' }).cells[0])
+  // 64 cells of distinct colours, at most 60 pairs: bits are dropped until it fits.
+  const many = new Uint8Array(64 * 32 * 3)
+  for (let c = 0; c < 64; c += 1) {
+    for (let k = 0; k < 32; k += 1) {
+      const i = ((Math.floor(k / 4) * 64 * 4) + c * 4 + (k % 4)) * 3
+      many.set([c * 4, 255 - c * 4, (c * 37) % 256], i)
+    }
+  }
+  const capped = encodeCells(many, 64, 1, { maxPairs: 60 })
+  expect(encodeCells(many, 64, 1).pairs).toBe(64)
+  expect(capped.pairs).toBeLessThanOrEqual(60)
+  expect(capped.bits).toBeLessThan(8)
+})
+
+test('/crew web inside Orca opens an Orca browser tab', async ($, on) => {
+  engine(on)
+  const runs: (readonly string[])[] = []
+  on('env.get', (_$, e) => ({ value: e.name === 'USERPROFILE' ? 'C:/Users/me' : e.name === 'TERM_PROGRAM' ? 'Orca' : e.name === 'OS' ? 'Windows_NT' : undefined }))
+  on('fs.read', (_$, e) => ({ value: `// ${e.path}` }))
+  on('fs.write', () => ({ value: undefined }))
+  on('process.run', (_$, e) => {
+    runs.push(e.argv)
+    return { value: { exitCode: 0, stdout: '{"ok":true}', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+  })
+  on('session.id', () => ({ value: 'sess-o' }))
+  const { text } = await $.command.run({ command: 'crew', args: 'web' } as never)
+  expect(text).toContain('Orca browser tab')
+  expect(runs).toEqual([['orca', 'tab', 'create', '--url', 'file:///C:/Users/me/.claude/crew-graph/index.html', '--json']])
 })
