@@ -4,7 +4,7 @@ import { expect, mock, test } from 'claude-code/testing'
 import { bigFrame, miniFrame } from '../hooks/clawd'
 import { toEvent } from '../hooks/input3d'
 import { encodeCells, inkOf } from '../bin/cells.mjs'
-import { absPath, clip, describeCall, kindOf, pushEvent, scrollbar, snapshotOf, titleOf, touchFile } from '../hooks/crew'
+import { absPath, clip, describeCall, kindOf, pushEvent, scrollbar, snapshotOf, titleOf, touchFile, withAbs } from '../hooks/crew'
 import { DEFAULT_ARCHITECT, DEFAULT_GATE, DEFAULT_MAIN, DEFAULT_TURN, DEFAULT_USAGE, normalizeCard, parseConfig } from '../hooks/deck/core'
 import { allowedFiles, isOpenable, makeActions, norm, parseDataJs } from '../overlay/actions.mjs'
 import { summarize, summarizeFile } from '../overlay/summary.mjs'
@@ -541,4 +541,12 @@ test('the pet opens or reveals only paths the snapshot lists, and only safe type
   expect(await make(true).open('../a.md')).toBe('denied')
   expect(calls).toEqual([])
   expect(await make(true).reveal('C:/Work/Notes/a.md')).toBe('reveal')
+})
+
+test('files recorded before absolute paths were kept get one from the working directory', () => {
+  const old = { path: 'web/app.js', kind: 'code' as const, by: { main: 'w' as const }, last: 1 }
+  expect(withAbs(old, String.raw`G:\work\proj`).abs).toBe('G:/work/proj/web/app.js')
+  // A clipped short path cannot be rebuilt; one that has its path keeps it.
+  expect(withAbs({ ...old, path: '…ng/web/app.js' }, 'G:/work').abs).toBeUndefined()
+  expect(withAbs({ ...old, abs: 'D:/x/app.js' }, 'G:/work').abs).toBe('D:/x/app.js')
 })
