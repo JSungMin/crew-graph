@@ -96,6 +96,16 @@ export function absPath(file: string, cwd: string): string | undefined {
   return root ? `${root}/${f.replace(/^\.\//, '')}` : undefined
 }
 
+/**
+ * A file recorded without its absolute path (by a version before 0.6, which kept only the short
+ * one) gets it back from the session's working directory, unless the short path was clipped.
+ */
+export function withAbs(f: FileNode, cwd: string): FileNode {
+  if (f.abs || !cwd || f.path.startsWith('…')) return f
+  const abs = absPath(f.path, cwd)
+  return abs ? { ...f, abs } : f
+}
+
 export function touchFile(list: FileNode[], path: string, key: string, op: 'r' | 'w', now: number, abs?: string): FileNode[] {
   const found = list.find(n => n.path === path)
   const prev = found?.by[key]
@@ -215,7 +225,7 @@ export function snapshotOf(s: SnapshotInput) {
         : undefined,
     },
     agents: [mainAgent, ...agents],
-    files: s.files,
+    files: s.files.map(f => withAbs(f, s.cwd)),
     events: s.events,
     gate: { allowed: g.rule, asked: g.cleared, denied: g.deny, pending: g.ask },
     architect: {
