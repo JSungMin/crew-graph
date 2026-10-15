@@ -226,6 +226,14 @@ function demo(h) {
 }
 
 /* ---------------------------------------------------------------- the 3D part */
+/* A free list for the things shown for a moment (crumbs, smoke, "nom" labels). `take(make)` hands back a released one or makes a new one;
+   `give(x)` releases it when it ends. Their meshes stay in the scene, hidden, so none is made twice: a list that only dropped the
+   ended ones left every mesh behind and grew by one for each crumb ever thrown. */
+function makePool() {
+  const free = [];
+  return { take: (make) => (free.length ? free.pop() : make()), give: (x) => { if (x != null && free.indexOf(x) < 0) free.push(x); }, size: () => free.length };
+}
+
 function create(api) {
   const T = api.T, scene = api.scene, agents = api.agents;
   const { clamp, lerp, easeIO, easeOutBack, nowS } = api;
@@ -238,7 +246,7 @@ function create(api) {
     inited: false, list: [], blocked: new Set(), eatenTarget: {}, eatenShown: new Map(), on: true,
     stations: new Map(),                  // agent id -> { plate, eaten chip, more chip }
     table: null, own: new Map(),          // own: agent id -> what its pose needs this frame
-    crumbs: [], puffs: [], moving: false, seq: 0, lockTex: null, frame: 0,
+    crumbs: [], puffs: [], crumbPool: makePool(), puffPool: makePool(), nomPool: makePool(), moving: false, seq: 0, lockTex: null, frame: 0,
     eatFree: new Map(),                   // eater id -> when its last scheduled eat ends: the next one starts then
     noms: [], plus: [], nomTex: null, plusTex: null,   // the "nom" pops at the mouth, the "+1" flying to the counter
   };
@@ -404,10 +412,10 @@ function create(api) {
     S.recs.clear(); S.base.clear(); S.inited = false; S.list = []; S.blocked = new Set(); S.eatenTarget = {}; S.eatenShown.clear(); S.own.clear();
     S.stations.forEach((st) => { world.remove(st.plate); disposeChip(st.eaten); disposeChip(st.more); }); S.stations.clear();
     if (S.table) { world.remove(S.table.g); disposeChip(S.table.more); S.table = null; }
-    S.crumbs.forEach((c) => { c.m.visible = false; }); S.crumbs.length = 0;
-    S.puffs.forEach((p) => { p.sp.visible = false; }); S.puffs.length = 0;
-    S.noms.forEach((n) => { n.sp.visible = false; }); S.noms.length = 0;
-    S.plus.forEach((n) => { n.sp.visible = false; }); S.plus.length = 0;
+    S.crumbs.forEach((c) => { c.m.visible = false; S.crumbPool.give(c); }); S.crumbs.length = 0;
+    S.puffs.forEach((p) => { p.sp.visible = false; S.puffPool.give(p); }); S.puffs.length = 0;
+    S.noms.forEach((n) => { n.sp.visible = false; S.nomPool.give(n); }); S.noms.length = 0;
+    S.plus.forEach((n) => { n.sp.visible = false; world.remove(n.sp); n.sp.material.dispose(); }); S.plus.length = 0; // a "+1" has its own material: dispose it like stepFx does
     S.eatFree.clear();
   }
 
@@ -483,8 +491,8 @@ function create(api) {
     if (!m) { m = new T.MeshLambertMaterial({ color: new T.Color(color), flatShading: true }); crumbMats.set(color, m); }
     const kk = k || 0.3;
     for (let i = 0; i < n; i++) {
-      let c = S.crumbs.length >= 60 ? S.crumbs.shift() : null;
-      if (!c) { c = { m: new T.Mesh(BOX, m) }; world.add(c.m); } else c.m.material = m;
+      const c = S.crumbs.length >= 60 ? S.crumbs.shift() : S.crumbPool.take(() => { const x = { m: new T.Mesh(BOX, m) }; world.add(x.m); return x; });
+      c.m.material = m;
       c.m.visible = true; c.t0 = nowS(); c.fall = 0.6 + Math.random() * 0.35; c.rest = land ? 0.4 : 0; c.life = c.fall + c.rest;
       c.sz = (0.4 + Math.random() * 0.35) * kk;                  // 4 to 8 px at the pet's default size
       c.p0 = (c.p0 || new T.Vector3()).copy(pos);
@@ -517,8 +525,7 @@ function create(api) {
   function nom(pos, k, now) { // one "nom" next to the mouth, rising and fading
     if (ps().reduceMotion) return;
     if (!S.nomTex) S.nomTex = labelTex('nom', '#ffd166', true);
-    let n = S.noms.length >= 8 ? S.noms.shift() : null;
-    if (!n) n = { sp: popSprite(S.nomTex, 13) };
+    const n = S.noms.length >= 8 ? S.noms.shift() : S.nomPool.take(() => ({ sp: popSprite(S.nomTex, 13) }));
     n.t0 = now; n.k = k; n.x = pos.x; n.y = pos.y; n.z = pos.z; n.dx = (Math.random() < 0.5 ? -1 : 1) * (1.5 + Math.random() * 0.8) * k;
     S.noms.push(n);
   }
@@ -536,8 +543,7 @@ function create(api) {
   const counterPos = (a, out) => { const pp = platePos(a); return toWorld(a, pp.x, 0.2 + 1.4, pp.z + 3.4, out); };
   function puff(pos, size, delay) {
     if (ps().reduceMotion) return;
-    let p = S.puffs.length >= 24 ? S.puffs.shift() : null;
-    if (!p) { p = { sp: new T.Sprite(new T.SpriteMaterial({ map: api.SMOKE_TEX, transparent: true, depthTest: false, fog: false })) }; p.sp.renderOrder = 11; world.add(p.sp); }
+    const p = S.puffs.length >= 24 ? S.puffs.shift() : S.puffPool.take(() => { const x = { sp: new T.Sprite(new T.SpriteMaterial({ map: api.SMOKE_TEX, transparent: true, depthTest: false, fog: false })) }; x.sp.renderOrder = 11; world.add(x.sp); return x; });
     p.sp.visible = false; p.sp.material.opacity = 0;
     p.x = pos.x + (Math.random() - 0.5) * size * 0.6; p.y = pos.y; p.z = pos.z + (Math.random() - 0.5) * size * 0.6; p.t0 = nowS() + (delay || 0); p.dur = 0.7; p.size = size; p.vy = 0.8 + Math.random() * 0.8; p.rot = Math.random() * 6;
     S.puffs.push(p);
@@ -545,7 +551,7 @@ function create(api) {
   function stepFx(now, dt) {
     for (let i = S.crumbs.length - 1; i >= 0; i--) {
       const c = S.crumbs[i], el = now - c.t0;
-      if (el >= c.life) { c.m.visible = false; S.crumbs.splice(i, 1); continue; }
+      if (el >= c.life) { c.m.visible = false; S.crumbs.splice(i, 1); S.crumbPool.give(c); continue; }
       const u = Math.min(1, el / c.fall), e = u * u * (0.35 + 0.65 * u);   // eases in like something falling
       c.m.position.set(lerp(c.p0.x, c.p1.x, u), lerp(c.p0.y, c.p1.y, e) + 4 * c.h * u * (1 - u), lerp(c.p0.z, c.p1.z, u));
       if (el < c.fall) { c.m.rotation.x += dt * 9; c.m.rotation.y += dt * 7; }
@@ -553,7 +559,7 @@ function create(api) {
     }
     for (let i = S.noms.length - 1; i >= 0; i--) {
       const n = S.noms[i], u = (now - n.t0) / 0.6;
-      if (u >= 1) { n.sp.visible = false; S.noms.splice(i, 1); continue; }
+      if (u >= 1) { n.sp.visible = false; S.noms.splice(i, 1); S.nomPool.give(n); continue; }
       n.sp.visible = true; n.sp.position.set(n.x + n.dx * (0.6 + 0.4 * u), n.y + (1.2 + 1.6 * u) * n.k, n.z);
       const pop = 1 + 0.35 * Math.max(0, 1 - u / 0.25);
       n.sp.scale.set(2.2 * n.k * 3.2 * pop * 0.5, 0.88 * n.k * 3.2 * pop * 0.5, 1); n.sp.material.opacity = u < 0.6 ? 1 : 1 - (u - 0.6) / 0.4;
@@ -577,7 +583,7 @@ function create(api) {
     for (let i = S.puffs.length - 1; i >= 0; i--) {
       const p = S.puffs[i], u = (now - p.t0) / p.dur;
       if (u < 0) continue;
-      if (u >= 1) { p.sp.visible = false; S.puffs.splice(i, 1); continue; }
+      if (u >= 1) { p.sp.visible = false; S.puffs.splice(i, 1); S.puffPool.give(p); continue; }
       p.sp.visible = true; p.sp.position.set(p.x, p.y + p.vy * u * p.dur * 0.5, p.z);
       p.sp.scale.setScalar(p.size * (0.5 + 1.1 * Math.min(1, u * 2))); p.sp.material.opacity = 0.9 * (1 - clamp((u - 0.15) / 0.85, 0, 1)); p.sp.material.rotation = p.rot + u * 1.5;
     }
@@ -903,5 +909,5 @@ function create(api) {
   };
 }
 
-return { demo, cleanList, blockedIds, diff, agentFor, eaterId, stackSlot, tableSlot, cardLines, FOODS, TURN_FOOD, BUILTIN_FOOD, MOTION_OF, foodFor, create, SHOWN, EAT, eatSlot, boostFor, foodHeight, eatSize };
+return { demo, cleanList, blockedIds, diff, agentFor, eaterId, stackSlot, tableSlot, cardLines, FOODS, TURN_FOOD, BUILTIN_FOOD, MOTION_OF, foodFor, create, makePool, SHOWN, EAT, eatSlot, boostFor, foodHeight, eatSize };
 });
