@@ -238,6 +238,7 @@ test('a stored book that is missing, old or damaged still reads', () => {
   expect(normalizeBook({ todo: 'x', task: [null, { id: 'task:1', title: 't', status: 'weird', t: 'x' }], eaten: { main: 2, a: -1, b: 'x' } })).toEqual({
     todo: [],
     task: [{ id: 'task:1', src: 'todo', title: 't', status: 'pending', t: 0 }],
+    turn: [],
     eaten: { main: 2 },
   })
   expect(bumpEaten(EMPTY_BOOK, 'a1').eaten).toEqual({ a1: 1 })

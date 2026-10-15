@@ -1,6 +1,7 @@
 // crew-graph's task tracking: what the agents' to-do lists and tasks say, kept as plain data for the pet and the browser view.
-// Three sources become one list (docs/DATA_CONTRACT.md, `tasks`): TodoWrite (an agent's whole list, replaced on every call),
-// TaskCreate / TaskUpdate (one shared list, an owner per task), and the subagent cards (a ticket owned by the child). Nothing here touches `$`.
+// Four sources become one list (docs/DATA_CONTRACT.md, `tasks`): TodoWrite (an agent's whole list, replaced on every call),
+// TaskCreate / TaskUpdate (one shared list, an owner per task), the subagent cards (a ticket owned by the child), and the prompt turns of
+// the main loop (proxy food, for a session whose model has no task tools). Nothing here touches `$`.
 import type { AgentCard, Parents, TaskBook, TaskItem, TaskStatus } from '../types'
 import { clip } from './crew'
 import { redact } from './deck/core'
@@ -8,14 +9,18 @@ import { redact } from './deck/core'
 /** Cells of a title in the snapshot; the active text (activeForm) is a little shorter. */
 export const MAX_TITLE = 80
 export const MAX_ACTIVE = 60
+/** A prompt turn's title is shorter: it is the user's own words, and it goes into data.js. */
+export const MAX_TURN_TITLE = 60
 /** What the snapshot carries: every open task up to this many, the last few closed ones, a deleted one for a moment. */
 export const MAX_OPEN = 40
 export const MAX_CLOSED = 10
 export const DELETED_MS = 5000
+/** A prompt waiting behind a running turn for longer than this is not waiting any more (its turn never came); it leaves the book. */
+export const QUEUED_STALE_MS = 30 * 60_000
 /** What the stored state keeps per list, so a long session does not grow it without bound. */
 export const MAX_STORED = 200
 
-export const EMPTY_BOOK: TaskBook = { todo: [], task: [], eaten: {} }
+export const EMPTY_BOOK: TaskBook = { todo: [], task: [], turn: [], eaten: {} }
 
 /** The tools whose calls are read (see noteTasks in register.tsx). */
 export const TASK_TOOLS = new Set(['TodoWrite', 'TaskCreate', 'TaskUpdate'])
@@ -40,7 +45,7 @@ export const taskText = (s: unknown, n: number) => clip(redact(str(s)).replace(/
 function normalizeItem(v: unknown): TaskItem | null {
   if (!isObject(v) || typeof v.id !== 'string' || typeof v.title !== 'string') return null
   const status = STATUSES.includes(str(v.status)) ? (v.status as TaskStatus) : 'pending'
-  const src = v.src === 'task' || v.src === 'agent' ? v.src : 'todo'
+  const src = v.src === 'task' || v.src === 'agent' || v.src === 'turn' ? v.src : 'todo'
   const item: TaskItem = { id: v.id, src, title: v.title, status, t: typeof v.t === 'number' ? v.t : 0 }
   if (typeof v.owner === 'string' && v.owner) item.owner = v.owner
   if (typeof v.active === 'string' && v.active) item.active = v.active
@@ -55,7 +60,7 @@ export function normalizeBook(stored: unknown): TaskBook {
   const list = (v: unknown) => (Array.isArray(v) ? v.map(normalizeItem).filter((x): x is TaskItem => x !== null) : [])
   const eaten: Record<string, number> = {}
   if (isObject(stored.eaten)) for (const [k, n] of Object.entries(stored.eaten)) if (typeof n === 'number' && n > 0) eaten[k] = Math.floor(n)
-  return { todo: list(stored.todo), task: list(stored.task), eaten }
+  return { todo: list(stored.todo), task: list(stored.task), turn: list(stored.turn), eaten }
 }
 
 /** Deleted items older than the window go; each list keeps at most MAX_STORED (closed ones go first). */
@@ -72,7 +77,7 @@ export function pruneBook(book: TaskBook, now: number): TaskBook {
       return true
     })
   }
-  return { ...book, todo: keep(book.todo), task: keep(book.task) }
+  return { ...book, todo: keep(book.todo), task: keep(book.task), turn: keep(book.turn.filter(i => !(i.status === 'pending' && now - i.t > QUEUED_STALE_MS))) }
 }
 
 /** One more thing the agent `eater` has eaten (an id that turned into completed). */
@@ -183,6 +188,49 @@ export function applyTaskUpdate(book: TaskBook, input: unknown, agent: string, k
   return pruneBook({ ...book, eaten, task: found ? book.task.map(x => (x.id === id ? item : x)) : [...book.task, item] }, now)
 }
 
+// ---------------------------------------------------------------- prompt turns (proxy food)
+
+/** What the engine puts in front of a prompt the plugin submitted ("The crew-graph plugin sent a message: ..."): not the user's words. */
+const PLUGIN_FRAME = /^\s*The [\w-]+ plugin sent a message:\s*/i
+
+/** A prompt as a turn's title: the plugin's frame dropped, one line, credentials masked, cut to MAX_TURN_TITLE cells. */
+export const turnTitle = (text: string) => taskText(text.replace(PLUGIN_FRAME, ''), MAX_TURN_TITLE) || 'prompt'
+
+const turnItem = (id: string, title: string, status: TaskStatus, now: number): TaskItem => ({ id: `turn:${id}`, src: 'turn', owner: 'main', title, status, t: now })
+
+/** A prompt typed while a turn runs waits its turn: a pending item on main's plate, under the queue id `qid`. */
+export function applyTurnQueued(book: TaskBook, qid: string, text: string, now: number): TaskBook {
+  const id = `turn:${qid}`
+  return pruneBook({ ...book, turn: [...book.turn.filter(i => i.id !== id), turnItem(qid, turnTitle(text), 'pending', now)] }, now)
+}
+
+/**
+ * Main's turn `turnId` starts with `text`: the queued item `fromQid` becomes it (in progress), else a new in-progress item. A turn that
+ * is still in progress when the next one starts lost its end (a reload, a missed event): it is closed as failed so it cannot stay in hand.
+ */
+export function applyTurnStart(book: TaskBook, turnId: string, text: string, now: number, fromQid?: string): TaskBook {
+  const id = `turn:${turnId}`
+  const from = fromQid ? `turn:${fromQid}` : ''
+  const queued = from ? book.turn.find(i => i.id === from) : undefined
+  const title = queued && !text.trim() ? queued.title : turnTitle(text)
+  const rest = book.turn.map(i => (i.status === 'in_progress' && i.id !== id ? { ...i, status: 'failed' as const, t: now } : i)).filter(i => i.id !== from && i.id !== id)
+  // the queued item's place in the line is kept: it was there first
+  const at = queued ? book.turn.indexOf(queued) : rest.length
+  const next = [...rest]
+  next.splice(Math.min(at, next.length), 0, turnItem(turnId, title, 'in_progress', now))
+  return pruneBook({ ...book, turn: next }, now)
+}
+
+/** Main's turn `turnId` ended: `answer` is eaten (completed, main's count goes up), anything else (aborted, error, refusal) fails. A turn the book never saw changes nothing. */
+export function applyTurnEnd(book: TaskBook, turnId: string, reason: string, now: number): TaskBook {
+  const id = `turn:${turnId}`
+  const found = book.turn.find(i => i.id === id)
+  if (!found) return book
+  const status: TaskStatus = reason === 'answer' ? 'completed' : 'failed'
+  const eaten = status === 'completed' && found.status !== 'completed' ? { ...book.eaten, main: (book.eaten.main ?? 0) + 1 } : book.eaten
+  return pruneBook({ ...book, eaten, turn: book.turn.map(i => (i.id === id ? { ...i, status, t: now } : i)) }, now)
+}
+
 // ---------------------------------------------------------------- the snapshot's list
 
 /** A subagent card as a ticket owned by the child, to be handed to its parent when it is done. */
@@ -207,7 +255,7 @@ export function ticketOf(c: AgentCard, parents: Parents): TaskItem {
 export function tasksOf(book: TaskBook, cards: AgentCard[], parents: Parents, now: number, hidden?: ReadonlySet<string>): TaskItem[] {
   // the tickets first: a long to-do list must not push a subagent's ticket out of the cap
   const mine = (i: TaskItem) => !(hidden && i.owner !== undefined && hidden.has(i.owner))
-  const all = [...cards.map(c => ticketOf(c, parents)), ...book.todo, ...book.task].filter(mine)
+  const all = [...cards.map(c => ticketOf(c, parents)), ...book.todo, ...book.task, ...book.turn].filter(mine)
   const open = all.filter(i => isOpen(i.status)).slice(0, MAX_OPEN)
   const closed = all
     .filter(i => i.status === 'completed' || i.status === 'failed')

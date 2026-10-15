@@ -183,6 +183,7 @@ async function askHost($: Engine, on: On, opts: { settings?: string; pet?: boole
       agents: { id: string }[]
       files: { path: string; by: Record<string, string> }[]
       lastReply?: { at: number; text: string }
+      tasks?: { id: string; src: string; status: string; title: string }[]
       petAck?: number
     }
   }
@@ -431,4 +432,17 @@ test('an accepted request is acknowledged in the snapshot (petAck = its seq); a 
   await h.send({ kind: 'dismiss', ids: ['ghost'] })
   await h.clock.advance(600)
   expect(h.snap().petAck).toBe(h.state.seq)
+})
+
+test('a question typed into the pet is a prompt turn titled by the words typed, not by the frame', { options: { foodFrom: 'todos+work' } }, async ($, on) => {
+  const h = await askHost($, on)
+  await h.send({ kind: 'ask', mode: 'send', text: 'why is it slow?', agentId: undefined })
+  expect(h.submits).toHaveLength(1)
+  // the engine frames the text when it opens the turn
+  await $.turn.start({ text: `The crew-graph plugin sent a message: ${h.submits[0]?.text}`, turnId: 'Q1' })
+  await h.clock.advance(600)
+  expect(h.snap().tasks?.filter(i => i.src === 'turn').map(i => [i.status, i.title])).toEqual([['in_progress', 'why is it slow?']])
+  await $.turn.complete({ turnId: 'Q1', answer: 'because', reason: 'answer', durationMs: 5 } as never)
+  await h.clock.advance(600)
+  expect(h.snap().tasks?.filter(i => i.src === 'turn').map(i => [i.status, i.title])).toEqual([['completed', 'why is it slow?']])
 })

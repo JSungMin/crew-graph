@@ -95,6 +95,7 @@ main=crab, Explore=cat, *=auto
 | `/crew web [noopen\|off]` | 브라우저 화면 |
 | `/crew 3d [off]` | 패널 속 3D |
 | `/crew characters [reload]` | 캐릭터 목록과 누가 무엇을 받는지 |
+| `/crew setup` | 이 세션에 작업 도구가 있는지, 캐릭터의 먹이가 어디서 오는지 보여 줌(아무것도 바꾸지 않음) |
 | `/crew layout auto\|compact\|wide\|mini` | 패널 배치 |
 
 옵션(`/config`): `petOnStart`, `webOnStart`, `characters`, `layout`, `panels`, 그리고 [Flightdeck 옵션 전부](docs/guide.md#configure).
