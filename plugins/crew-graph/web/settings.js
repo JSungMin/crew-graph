@@ -118,6 +118,7 @@ function paintPlain() {
   $('opacityV').textContent = S.opacity + '%';
   Array.prototype.forEach.call($('size').children, (b) => b.classList.toggle('on', b.dataset.size === S.size));
   Array.prototype.forEach.call($('autoDismiss').children, (b) => b.classList.toggle('on', Number(b.dataset.min) === S.autoDismiss));
+  Array.prototype.forEach.call($('food').children, (b) => b.classList.toggle('on', b.dataset.food === S.food));
 }
 function paint() { paintPlain(); paintTiles(); paintTypes(); paintAgents(); }
 
@@ -128,6 +129,7 @@ $('onTop').addEventListener('change', (e) => push({ alwaysOnTop: e.target.checke
 $('opacity').addEventListener('input', (e) => { $('opacityV').textContent = e.target.value + '%'; push({ opacity: Number(e.target.value) }); });
 Array.prototype.forEach.call($('size').children, (b) => b.addEventListener('click', () => push({ size: b.dataset.size })));
 Array.prototype.forEach.call($('autoDismiss').children, (b) => b.addEventListener('click', () => push({ autoDismiss: Number(b.dataset.min) })));
+Array.prototype.forEach.call($('food').children, (b) => b.addEventListener('click', () => push({ food: b.dataset.food })));
 $('reset').addEventListener('click', () => { if (pet) pet.resetSettings(); });
 $('close').addEventListener('click', () => { if (pet) pet.closeSettings(); });
 $('done').addEventListener('click', () => { if (pet) pet.closeSettings(); });

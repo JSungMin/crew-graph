@@ -50,11 +50,14 @@ The first `/crew pet` installs Electron (~100 MB) once, in the background, and o
 | **Stroke** it (hover back and forth) | Pet: happy eyes and hearts |
 | **Click** a file | Opens it |
 | **Hover** a character or a file | A card: status and steps, or a file summary |
+| Watch the **tasks** | Each to-do item is food: on a plate while it waits, in hand while it is worked on, eaten when it is done. Hover one for a card |
 | **Right-click** | `Character ▸`, `Ask Claude…`, `Settings…`, open, copy path |
 | **Right-click** a finished agent | `Dismiss` (it waves and pops away); a running one: `Ask Claude to stop it` |
 | Wheel · Ctrl+wheel · right-drag | Zoom · resize · rotate |
 
 Clicks on the transparent parts go through to your desktop.
+
+<img src="docs/screenshots/tasks.png" width="640" alt="Agents with their tasks as food: carrots, fish, treat sticks and a battery on plates and in hands, a lock on a blocked task, and below, the crab eating a fish with crumbs flying">
 
 <table>
 <tr>

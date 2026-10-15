@@ -16,7 +16,8 @@ type Settings = {
   default: string | null
   types: Record<string, string>
   agents: Record<string, string>
-  show: { bubbles: boolean; ticker: boolean; papers: boolean; nameplate: boolean }
+  show: { bubbles: boolean; ticker: boolean; papers: boolean; nameplate: boolean; tasks: boolean }
+  food: string
   reduceMotion: boolean
   alwaysOnTop: boolean
   opacity: number
@@ -29,6 +30,8 @@ type Pet = {
   defaults(): Settings
   sanitize(raw: unknown): Settings
   merge(cur: unknown, patch: unknown): Settings
+  FOODS: string[]
+  SHOW_KEYS: string[]
   agentKey(session: string, id: string): string
   resolve(s: Settings, rules: [string, string][], agent: Agent, ctx: { ids: string[]; auto?: (a: Agent) => { id: string; why: string[] } | null; session: string }): Pick | null
   explain(r: Pick | null): string
@@ -56,7 +59,8 @@ test('settings are checked: bad values dropped, missing ones the default, unsafe
     default: 'auto',
     types: { Explore: 'cat', bad: 42, '': 'crab', 'with space': 'a b', main: 'crab', __proto__: 'crab', constructor: 'crab' },
     agents: { 'sess|a1': 'random', [`x`.repeat(201)]: 'crab' },
-    show: { bubbles: false, ticker: 'no', nameplate: false },
+    show: { bubbles: false, ticker: 'no', nameplate: false, tasks: 'yes' },
+    food: 'steak',
     reduceMotion: true,
     alwaysOnTop: 'yes',
     opacity: 12,
@@ -67,7 +71,8 @@ test('settings are checked: bad values dropped, missing ones the default, unsafe
   expect(s.types).toEqual({ Explore: 'cat', main: 'crab' })
   expect(Object.keys(s.types)).not.toContain('__proto__')
   expect(s.agents).toEqual({ 'sess|a1': 'random' })
-  expect(s.show).toEqual({ bubbles: false, ticker: true, papers: true, nameplate: false })
+  expect(s.show).toEqual({ bubbles: false, ticker: true, papers: true, nameplate: false, tasks: true })
+  expect(s.food).toBe('character') // an unknown food is dropped
   expect(s.reduceMotion).toBe(true)
   expect(s.alwaysOnTop).toBe(true)
   expect(s.opacity).toBe(60) // 60-100
@@ -85,7 +90,7 @@ test('a patch changes only what it names; null or "" removes a rule; the window 
   s = pet.merge(s, { default: 'random', types: { Explore: 'cat', '*': 'auto' }, show: { ticker: false }, opacity: 80, size: 'L' })
   expect(s.default).toBe('random')
   expect(s.types).toEqual({ Explore: 'cat', '*': 'auto' })
-  expect(s.show).toEqual({ bubbles: true, ticker: false, papers: true, nameplate: true })
+  expect(s.show).toEqual({ bubbles: true, ticker: false, papers: true, nameplate: true, tasks: true })
   expect([s.opacity, s.size]).toEqual([80, 'L'])
   s = pet.merge(s, { types: { Explore: null, Plan: 'mochi' }, default: null, agents: { 's|a': 'robot' } })
   expect(s.types).toEqual({ '*': 'auto', Plan: 'mochi' })
@@ -101,6 +106,23 @@ test('a patch changes only what it names; null or "" removes a rule; the window 
   expect(Object.keys(pet.SIZES)).toEqual(['S', 'M', 'L'])
   expect(pet.SIZES.S?.width).toBeLessThan(pet.SIZES.M?.width ?? 0)
   expect(pet.SIZES.M?.width).toBeLessThan(pet.SIZES.L?.width ?? 0)
+})
+
+test('the task settings: show.tasks defaults on, food is character or ticket, anything else changes nothing', () => {
+  const d = pet.defaults()
+  expect(d.show.tasks).toBe(true)
+  expect(d.food).toBe('character')
+  expect(pet.sanitize({ show: { tasks: false }, food: 'ticket' })).toMatchObject({ show: { tasks: false }, food: 'ticket' })
+  expect(pet.sanitize({ show: { tasks: 0 }, food: 7 })).toEqual(d)
+  let s = pet.merge(d, { show: { tasks: false }, food: 'ticket' })
+  expect([s.show.tasks, s.food]).toEqual([false, 'ticket'])
+  // a patch with a bad value keeps what was there; the other keys of the patch still count
+  s = pet.merge(s, { show: { tasks: 'on', bubbles: false }, food: 'pizza' })
+  expect([s.show.tasks, s.show.bubbles, s.food]).toEqual([false, false, 'ticket'])
+  s = pet.merge(s, { food: 'character', show: { tasks: true } })
+  expect([s.show.tasks, s.food]).toEqual([true, 'character'])
+  expect(pet.FOODS).toEqual(['character', 'ticket'])
+  expect(pet.SHOW_KEYS).toContain('tasks')
 })
 
 test('the maps keep the newest entries when they are full', () => {

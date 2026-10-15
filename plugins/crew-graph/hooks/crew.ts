@@ -1,6 +1,6 @@
 // crew-graph's own pure helpers: what a tool call means for the crew, file kinds, cell-width
 // clipping, and the snapshot the browser view reads. Nothing here touches `$`.
-import type { AgentCard, Architect, CrewEvent, FileNode, Gate, LastReply, LoopAct, Main, Parents, Receipt, Turn, Usage, Verb } from '../types'
+import type { AgentCard, Architect, CrewEvent, FileNode, Gate, LastReply, LoopAct, Main, Parents, Receipt, TaskItem, Turn, Usage, Verb } from '../types'
 import { gateSummary, isAdvising, redact } from './deck/core'
 
 export const MAX_FILES = 60
@@ -159,6 +159,9 @@ export type SnapshotInput = {
   lastReply?: LastReply | null
   /** The newest pet request (its seq) the mod accepted; left out of the snapshot when 0. */
   ack?: number
+  /** The tasks to list (tasksOf in ./tasks) and how many each agent has eaten (the book's counters). */
+  tasks?: TaskItem[]
+  eaten?: Record<string, number>
 }
 
 /** What the browser view reads (docs/DATA_CONTRACT.md, v1). */
@@ -237,6 +240,8 @@ export function snapshotOf(s: SnapshotInput) {
     ...(s.chars && s.chars.length > 0 ? { chars: s.chars } : {}),
     ...(s.lastReply ? { lastReply: s.lastReply } : {}),
     ...(s.ack ? { petAck: s.ack } : {}),
+    tasks: s.tasks ?? [],
+    ...(s.eaten && Object.keys(s.eaten).length > 0 ? { eaten: s.eaten } : {}),
     architect: {
       consults: s.architect.consults.length,
       running: isAdvising(s.architect),

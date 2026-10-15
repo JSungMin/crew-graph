@@ -204,6 +204,10 @@ Two kinds of file
    chosen (siblings are spread over equally good characters, and an agent keeps the character it was first given). Words that
    count: lead main generalist code build fix test implement run explore search investigate locate review docs write summarize
    quick web plan architect design think advisor. Other words are fine, they just never match.
+   "food": "carrot": what this character works on and eats when the pet shows its tasks. A built-in (fish carrot treat seed battery
+   ticket), or boxes like a bone: "food": { "boxes": [ { "size":[2.4,0.5,0.5], "at":[0,0,0], "color":"#e8e0d0" }, ... ] }, centred on 0,
+   about 2.5 voxels long with the long side along x, at most 40 boxes. Without one, the crab gets a fish, the bunny a carrot, the cat a
+   treat stick, the hamster a sunflower seed, the robot a battery, and anyone else a paper ticket.
 
    The rig (every bone is optional; an animation skips the bones a character lacks):
      root body head earL earR eyeL eyeR mouth armL handL armR handR legL1 legL2 legL3 legR1 legR2 legR3 tail

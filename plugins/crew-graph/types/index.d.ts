@@ -141,6 +141,30 @@ export type CrewEvent = {
   text: string
 }
 
+/** A task as the pet and the browser view show it: a to-do item, a task, or a subagent's ticket. */
+export type TaskStatus = 'pending' | 'in_progress' | 'completed' | 'failed' | 'deleted'
+
+export type TaskItem = {
+  /** Namespaced and stable: `todo:<agent>:<hash of the content>`, `task:<id>`, `agent:<agent id>`. */
+  id: string
+  src: 'todo' | 'task' | 'agent'
+  /** The agent working on it ('main' or an agent id); absent for a task nobody took. */
+  owner?: string
+  title: string
+  /** The present-continuous form ("Running tests"), shown while it is in progress. */
+  active?: string
+  status: TaskStatus
+  /** Ids of the tasks this one waits for (same namespace as `id`). */
+  blockedBy?: string[]
+  /** An agent's ticket: the parent that eats it when it is done. */
+  deliverTo?: string
+  /** When the status last changed (ms since the epoch). */
+  t: number
+}
+
+/** What the mod keeps of the tasks: the to-do items of every agent, the shared tasks, and how many each agent has finished. Tickets are not stored (they come from the cards). */
+export type TaskBook = { todo: TaskItem[]; task: TaskItem[]; eaten: Record<string, number> }
+
 /** Parent links the engine reports for subagents (agent id -> parent agent id, 'main' for the main loop). */
 export type Parents = Record<string, string>
 
@@ -183,6 +207,7 @@ declare module 'claude-code' {
       files: FileNode[]
       events: CrewEvent[]
       parents: Parents
+      tasks: TaskBook
       frame: number
       autoOpened: boolean
       web: Web

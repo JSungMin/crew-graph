@@ -12,7 +12,8 @@ const RIG = ['root', 'body', 'head', 'earL', 'earR', 'eyeL', 'eyeR', 'mouth', 'a
   'legL1', 'legL2', 'legL3', 'legR1', 'legR2', 'legR3', 'tail'];
 const EYE_VARIANTS = ['x', 'squint', 'happy', 'sleepy', 'dizzy'];
 const CHAR_ID = /^[A-Za-z0-9._-]{1,40}$/;
-const LIMITS = { boxes: 400, coord: 80, size: 80 };
+const LIMITS = { boxes: 400, coord: 80, size: 80, food: 40 };
+const FOOD_ID = /^[a-z0-9_-]{1,24}$/;
 
 const hash = (s) => { let h = 2166136261; s = String(s); for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); } return h >>> 0; };
 
@@ -192,6 +193,16 @@ function box(b, warn, where) {
   return o;
 }
 const mirrorBox = (b) => Object.assign({}, b, { at: [-b.at[0], b.at[1], b.at[2]], rot: b.rot ? [b.rot[0], -b.rot[1], -b.rot[2]] : undefined });
+/* A pack's optional `food` (what its agent works on and eats): the id of a built-in food ("carrot"), or boxes like a bone
+   ({ boxes: [...] } or a bare list, on the same box rules, centred on 0, about 2 voxels long, the long side along x) -> { id } | { boxes } | null. */
+function foodOf(f, warn) {
+  if (typeof f === 'string') return FOOD_ID.test(f.toLowerCase()) ? { id: f.toLowerCase() } : null;
+  const list = Array.isArray(f) ? f : f && typeof f === 'object' && Array.isArray(f.boxes) ? f.boxes : null;
+  if (!list) return null;
+  const boxes = [];
+  for (const bx of list.slice(0, LIMITS.food)) { const nb = box(bx, warn, 'food'); if (nb) boxes.push(nb); }
+  return boxes.length ? { boxes } : null;
+}
 /* A voxel character as JSON -> a checked copy (every number finite and bounded, `mirror` expanded), or null.
    { id, name, scale?, base?, bones: { <rig name>: { parent?, at, rot?, gait?, mirror?, boxes } }, eyes?, props?, hit?, shadow?, travel? } */
 function normalizeDef(def) {
@@ -250,6 +261,7 @@ function normalizeDef(def) {
     ['page', 'hat'].forEach((k) => { if (p[k] && typeof p[k] === 'object') out.props[k] = { at: vec(p[k].at, 3, [0, 0, 0], LIMITS.coord), s: isNum(p[k].s) ? Math.max(0.2, Math.min(4, p[k].s)) : 1 }; });
     if (p.anten && typeof p.anten === 'object') out.props.anten = { at: vec(p.anten.at, 3, [0, 0, 0], LIMITS.coord), spread: isNum(p.anten.spread) ? Math.max(0.2, Math.min(20, p.anten.spread)) : 1.5 };
   }
+  if (def.food != null) { const fd = foodOf(def.food, warn); if (fd) out.food = fd; else warn.push('"food" must be a built-in food id or a list of boxes (ignored)'); }
   if (def.hit && typeof def.hit === 'object') out.hit = { y: isNum(def.hit.y) ? Math.max(0, Math.min(40, def.hit.y)) : null, r: isNum(def.hit.r) ? Math.max(0.3, Math.min(3, def.hit.r)) : null };
   if (Array.isArray(def.shadow) && def.shadow.length >= 2) out.shadow = vec(def.shadow, 2, [8.5, 6.5], 40);
   return { def: out, warnings: warn };
