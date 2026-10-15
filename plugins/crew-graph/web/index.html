@@ -54,6 +54,7 @@ html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);font:12px/1.
 #tip{position:fixed;z-index:4;pointer-events:none;display:none;max-width:340px;background:rgba(10,12,18,.92);border:1px solid var(--line);border-radius:8px;padding:5px 8px;font-size:11px;word-break:break-all}
 #help{position:fixed;left:50%;top:10px;transform:translateX(-50%);color:var(--dim);font-size:10px;opacity:.55;pointer-events:none}
 @media (max-width:820px){#right{display:none}#left{width:230px}#help{display:none}}
+body.embed #left, body.embed #right, body.embed #chip, body.embed #help, body.embed #tip { display: none !important; }
 </style>
 </head>
 <body>

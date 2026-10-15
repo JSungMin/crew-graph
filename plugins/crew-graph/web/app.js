@@ -26,6 +26,8 @@ let maxSeen = 0, inited = false, sessionId = null, fileSeq = 0;
 let selected = null, hover = null;
 const params = new URLSearchParams(location.search || '');
 const forceDemo = params.has('demo');
+// ?embed: drawn into the terminal's Crew pane by bin/crew-3d.mjs; no HUD, no demo fallback.
+const embed = params.has('embed');
 
 /* ---------------------------------------------------------------- scene */
 const host = $('stage');
@@ -106,6 +108,8 @@ function makeLabel(w, h, worldH) {
   const mat = new T.SpriteMaterial({ map: tex, transparent: true, depthTest: false, fog: false });
   const sp = new T.Sprite(mat); sp.center.set(0.5, 0); sp.renderOrder = 10;
   sp.scale.set(worldH * w / h, worldH, 1);
+  // Labels are unreadable at the terminal's few pixels: the embedded view draws none.
+  if (embed) mat.opacity = 0;
   return { cv, tex, mat, sp };
 }
 function paintLabel(L, l1, l2, dot, big) {
@@ -584,7 +588,8 @@ function fitBounds() {
   cam.gx = (x0 + x1) / 2; cam.gz = (z0 + z1) / 2;
   const r = Math.max(x1 - x0, z1 - z0) / 2 + 5;
   const asp = camera.aspect || 1;
-  cam.gd = clamp(r / Math.tan(25 * Math.PI / 180) * 0.85 / Math.min(1, asp), 14, 140);
+  // Embedded, the crabs must fill the few pixels the pane has: frame tighter.
+  cam.gd = clamp(r / Math.tan(25 * Math.PI / 180) * (embed ? 0.62 : 0.85) / Math.min(1, asp), embed ? 9 : 14, 140);
 }
 function updateCamera(dt, now) {
   if (autoFit) {
@@ -910,14 +915,34 @@ function demoTick() {
     events: demo.ev.slice(), gate: Object.assign({}, demo.g), architect: Object.assign({}, demo.ar) }, true);
 }
 
+/* ---------------------------------------------------------------- embed grab */
+// Renders one frame and returns it shrunk to w x h as base64 RGB, for the terminal Raster.
+let grabCanvas = null;
+window.__crewGrab = (w, h) => {
+  if (!renderer) return '';
+  renderer.render(scene, camera);
+  if (!grabCanvas) grabCanvas = document.createElement('canvas');
+  grabCanvas.width = w; grabCanvas.height = h;
+  const g = grabCanvas.getContext('2d', { willReadFrequently: true });
+  g.imageSmoothingEnabled = true; g.imageSmoothingQuality = 'high';
+  g.drawImage(renderer.domElement, 0, 0, w, h);
+  const d = g.getImageData(0, 0, w, h).data;
+  const out = new Uint8Array(w * h * 3);
+  for (let i = 0, j = 0; i < d.length; i += 4, j += 3) { out[j] = d[i]; out[j + 1] = d[i + 1]; out[j + 2] = d[i + 2]; }
+  let bin = '';
+  for (let i = 0; i < out.length; i += 0x8000) bin += String.fromCharCode.apply(null, out.subarray(i, i + 0x8000));
+  return btoa(bin);
+};
+
 /* ---------------------------------------------------------------- boot */
 resize();
 requestAnimationFrame(frame);
 setInterval(tickHud, 250);
 setChip();
+if (embed) document.body.classList.add('embed');
 if (forceDemo) startDemo();
 else {
   poll(); setInterval(poll, 500);
-  setTimeout(() => { if (!gotReal) startDemo(); }, 3000);
+  if (!embed) setTimeout(() => { if (!gotReal) startDemo(); }, 3000);
 }
 })();

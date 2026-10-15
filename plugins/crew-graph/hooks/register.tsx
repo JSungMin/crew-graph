@@ -3,7 +3,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { AgentCard, Architect, Bucket, Check, CrewEvent, FileNode, Gate, Layout, LogLine, Loop, LoopAct, Main, Roster, Turn, Usage, Verb, View, Web } from '../types'
+import type { AgentCard, Architect, Bucket, Check, CrewEvent, FileNode, Gate, Layout, LogLine, Loop, LoopAct, Main, Roster, Turn, Usage, Verb, View, View3d, Web } from '../types'
 import {
   DEFAULT_ARCHITECT,
   DEFAULT_GATE,
@@ -92,6 +92,7 @@ const events = atom({ plugin: 'crew-graph', key: 'events' } as const, [])
 const parents = atom({ plugin: 'crew-graph', key: 'parents' } as const, {})
 const autoOpened = atom({ plugin: 'crew-graph', key: 'autoOpened' } as const, false)
 const web = atom({ plugin: 'crew-graph', key: 'web' } as const, { isOn: false, dir: '', lastWriteAt: 0 })
+const view3d = atom({ plugin: 'crew-graph', key: 'view3d' } as const, { isOn: false, cols: 0, rows: 0, status: '' })
 
 type ServerBlock = { type: string; id?: string; name?: string; tool_use_id?: string }
 
@@ -347,6 +348,118 @@ async function openInBrowser($: EngineInterface, page: string) {
   await $.process.run(argv, { timeoutMs: 10_000 }).catch(() => undefined)
 }
 
+// ---------------------------------------------------------------- 3d view in the pane
+// bin/crew-3d.mjs renders the web view in a headless Chrome/Edge and streams it as Raster
+// cells (half blocks, two pixels a cell); each frame is blitted into the pane's `crew3d`.
+
+const RASTER_KEY = 'crew3d'
+const VIEW3D_OFF: View3d = { isOn: false, cols: 0, rows: 0, status: '' }
+let view3dGen = 0
+let last3d: { cols: number; rows: number; cells: string } | null = null
+let isRestarting3d = false
+
+async function getView3d($: EngineInterface): Promise<View3d> {
+  return normalize(VIEW3D_OFF, await read($, view3d))
+}
+
+const B64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
+
+/** Standard padded base64, without relying on the host having toBase64 or btoa. */
+function base64(bytes: Uint8Array): string {
+  let out = ''
+  for (let i = 0; i < bytes.length; i += 3) {
+    const a = bytes[i] ?? 0
+    const b = bytes[i + 1] ?? 0
+    const c = bytes[i + 2] ?? 0
+    const n = (a << 16) | (b << 8) | c
+    out += B64.charAt((n >> 18) & 63) + B64.charAt((n >> 12) & 63)
+    out += i + 1 < bytes.length ? B64.charAt((n >> 6) & 63) : '='
+    out += i + 2 < bytes.length ? B64.charAt(n & 63) : '='
+  }
+  return out
+}
+
+let blankCache: { key: string; cells: string } | null = null
+
+/** Blank cells for a raster not yet painted: spaces on the terminal's own colours. */
+function blankCells(cols: number, rows: number): string {
+  const key = `${cols}x${rows}`
+  if (blankCache?.key === key) return blankCache.cells
+  const words = new Uint32Array(cols * rows * 3)
+  for (let i = 0; i < cols * rows; i += 1) {
+    words[i * 3] = 0x20
+    words[i * 3 + 1] = 0x01000000
+    words[i * 3 + 2] = 0x01000000
+  }
+  blankCache = { key, cells: base64(new Uint8Array(words.buffer)) }
+  return blankCache.cells
+}
+
+async function start3d($: EngineInterface, cols: number, rows: number, fps: number): Promise<string> {
+  const started = await startWeb($, false)
+  const w = await getWeb($)
+  if (!w.isOn || !w.dir) return started
+  view3dGen += 1
+  const gen = view3dGen
+  last3d = null
+  await update($, view3d, () => ({ isOn: true, cols, rows, status: 'starting the renderer…' }))
+  void run3d($, gen, cols, rows, fps, w.dir)
+  return `Crew 3D view: ${cols}x${rows} cells in the pane (headless browser, ${fps} fps).`
+}
+
+async function stop3d($: EngineInterface, status = '') {
+  view3dGen += 1
+  last3d = null
+  await update($, view3d, () => ({ ...VIEW3D_OFF, status }))
+}
+
+async function restart3d($: EngineInterface, cols: number, rows: number, fps: number) {
+  isRestarting3d = false
+  if ((await getView3d($)).isOn) await start3d($, cols, rows, fps)
+}
+
+async function run3d($: EngineInterface, gen: number, cols: number, rows: number, fps: number, dir: string) {
+  const page = `file:///${dir.replace(/^\/+/, '')}/index.html`
+  const child = $.process.spawn({
+    argv: ['node', `${$.plugin.root}/bin/crew-3d.mjs`, '--page', page, '--cols', String(cols), '--rows', String(rows), '--fps', String(fps)],
+  })
+  let buf = ''
+  let denies = 0
+  let isDone = false
+  try {
+    for await (const piece of child) {
+      if (gen !== view3dGen) break
+      if (piece.stream !== 'stdout') continue
+      buf += piece.text
+      let at = buf.indexOf('\n')
+      while (at >= 0 && !isDone) {
+        const line = buf.slice(0, at)
+        buf = buf.slice(at + 1)
+        at = buf.indexOf('\n')
+        if (line.startsWith('C ')) {
+          const [, c = '0', r = '0', cells = ''] = line.split(' ')
+          last3d = { cols: Number(c), rows: Number(r), cells }
+          const res = await $.ui.blit({ requestId: PANE, key: RASTER_KEY, cells, columns: Number(c), rows: Number(r) }).catch(() => ({ deny: 'blit failed' }))
+          if ('deny' in res && res.deny !== undefined) {
+            denies += 1
+            // The pane is closed or the panel hidden for ~5 s: stop the browser.
+            if (denies > 40) isDone = true
+          } else {
+            if (denies > 0 || (await getView3d($)).status) await update($, view3d, v => ({ ...normalize(VIEW3D_OFF, v), status: '' }))
+            denies = 0
+          }
+        } else if (line.startsWith('E ')) {
+          await update($, view3d, v => ({ ...normalize(VIEW3D_OFF, v), status: line.slice(2) }))
+        }
+      }
+      if (isDone) break
+    }
+  } catch (err) {
+    if (gen === view3dGen) await update($, view3d, v => ({ ...normalize(VIEW3D_OFF, v), status: `renderer: ${String(err)}` }))
+  }
+  if (gen === view3dGen) await stop3d($, isDone ? 'stopped: the pane was closed' : (await getView3d($)).status || 'renderer ended')
+}
+
 // ---------------------------------------------------------------- hooks
 
 export const register: Register = (on, options) => {
@@ -359,7 +472,7 @@ export const register: Register = (on, options) => {
     await $.command.register({
       name: 'crew',
       description: 'Crew: the live agent dashboard with Clawd crabs; open, close, reset, layout, or the 3D web view',
-      argumentHint: '[open|close|reset|layout auto|compact|wide|mini|web [off|noopen]]',
+      argumentHint: '[open|close|reset|layout auto|compact|wide|mini|web [off|noopen]|3d [off]]',
     })
     await migrate($)
     cwd = String((e as { cwd?: string }).cwd ?? '')
@@ -391,6 +504,15 @@ export const register: Register = (on, options) => {
 
   on('command.run', { command: 'crew' }, async ($, e) => {
     const [verb = 'open', arg = ''] = e.args.trim().split(/\s+/)
+    if (verb === '3d') {
+      if (arg === 'off') {
+        await stop3d($)
+        return { text: 'Crew 3D view stopped.' }
+      }
+      await openPane($)
+      const cols = Math.max(20, Math.min(160, Number(arg) || PANE_COLUMNS - 2))
+      return { text: await start3d($, cols, cfg.view3dRows, cfg.view3dFps) }
+    }
     if (verb === 'web') {
       if (arg === 'off') {
         await update($, web, x => ({ ...normalize(WEB_OFF, x), isOn: false }))
@@ -734,7 +856,7 @@ export const register: Register = (on, options) => {
       getView($),
       $.clock.now(),
     ])
-    const [ac, fl, pa] = await Promise.all([getActs($), getFiles($), getParents($)])
+    const [ac, fl, pa, v3] = await Promise.all([getActs($), getFiles($), getParents($), getView3d($)])
     const W = Math.max(40, e.props.bodyColumns)
     const layout = v.layout ?? cfg.layout
     const isWide = layout === 'wide' || (layout === 'auto' && W >= 110)
@@ -754,6 +876,7 @@ export const register: Register = (on, options) => {
       loops: lp.length === 0,
       receipt: !m.isRunning && !r,
       crew: false,
+      '3d': !v3.isOn && !v3.status,
       log: false,
     }
     const panels = cfg.panels.filter(p => !isEmpty[p])
@@ -1199,6 +1322,37 @@ export const register: Register = (on, options) => {
       )
     }
 
+    // ---- 3d: the web view, streamed into a Raster by bin/crew-3d.mjs
+    const view3dPanel = (w: number) => {
+      const Raster = 'Raster' in els ? els.Raster : null
+      if (!v3.isOn || !Raster) {
+        return (
+          <Box flexDirection="column" width={w}>
+            <Text color={C.main} bold>3d view</Text>
+            <Text dimColor wrap="truncate">
+              {Raster ? v3.status || 'off · /crew 3d' : 'the terminal draws the 3D view; here, /crew web opens it in a browser'}
+            </Text>
+          </Box>
+        )
+      }
+      // A pane that changed width since the renderer started: restart it at the new size.
+      const want = Math.max(20, Math.min(160, w))
+      if (want !== v3.cols && !isRestarting3d) {
+        isRestarting3d = true
+        $.clock.after(400, () => void restart3d($, want, v3.rows, cfg.view3dFps))
+      }
+      const cells = last3d && last3d.cols === v3.cols && last3d.rows === v3.rows ? last3d.cells : blankCells(v3.cols, v3.rows)
+      return (
+        <Box flexDirection="column" width={w}>
+          <Box justifyContent="space-between">
+            <Text color={C.main} bold>3d view</Text>
+            <Text dimColor wrap="truncate">{v3.status || `${v3.cols}x${v3.rows} · /crew 3d off`}</Text>
+          </Box>
+          <Raster key={RASTER_KEY} columns={v3.cols} rows={v3.rows} cells={cells} />
+        </Box>
+      )
+    }
+
     // ---- log: whatever rows the other panels leave, 4 to 8
     // The main box's speed line and the gap above the log are a row each.
     const used = 2 + 5 + (m.speed ? 1 : 0) + 1 + (showArchitect ? 6 : 0) + 6 + (v.gateOpen ? 5 : 0) + (cards.length > cfg.maxCards ? 3 + Math.min(6, cards.length) : 8) + (expandedCard ? 8 : 0) + (lp.length ? 1 : 0) + 3
@@ -1230,7 +1384,9 @@ export const register: Register = (on, options) => {
     )
 
     const draw = (p: Panel, w: number) =>
-      p === 'crew'
+      p === '3d'
+        ? view3dPanel(w)
+        : p === 'crew'
         ? crewPanel(w)
         : p === 'main'
         ? mainPanel(w)
@@ -1252,7 +1408,7 @@ export const register: Register = (on, options) => {
         {ps.map((p, i) => {
           const prev = ps[i - 1]
           const link =
-            i === 0 || p === 'agents' || prev === 'agents' || p === 'log' || p === 'loops' || prev === 'loops' || p === 'crew' || prev === 'crew'
+            i === 0 || p === 'agents' || prev === 'agents' || p === 'log' || p === 'loops' || prev === 'loops' || p === 'crew' || prev === 'crew' || p === '3d' || prev === '3d'
               ? null
               : rail(`link-${p}`, p === 'architect' ? advising : m.isRunning, p === 'architect' ? C.arch : C.main, w)
           return (
@@ -1368,6 +1524,7 @@ export const register: Register = (on, options) => {
 
     const body = isWide ? (
       <Box flexDirection="column">
+        {panels.includes('3d') ? view3dPanel(W) : null}
         <Box columnGap={2}>
           {column(panels.filter(p => p === 'main' || p === 'architect' || p === 'gate'), colW)}
           {column(panels.filter(p => p === 'crew' || p === 'agents' || p === 'loops' || p === 'receipt'), colW)}

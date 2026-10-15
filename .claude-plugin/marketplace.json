@@ -11,8 +11,8 @@
     {
       "name": "crew-graph",
       "source": "./plugins/crew-graph",
-      "description": "Live agent dashboard with Clawd crabs: model vitals, permission gate, architect, subagent cards, the agent tree and plan/doc graph, plus a three.js web view of how agents interact (absorbs Flightdeck)",
-      "version": "0.2.0",
+      "description": "Live agent dashboard with Clawd crabs: model vitals, permission gate, architect, subagent cards, the agent tree and plan/doc graph, and a three.js 3D view of agents interacting, in the pane (/crew 3d) or the browser (/crew web). Absorbs Flightdeck",
+      "version": "0.3.0",
       "category": "productivity",
       "tags": [
         "mod",
