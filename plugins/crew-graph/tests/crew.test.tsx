@@ -186,6 +186,62 @@ test('/crew web copies the viewer and writes data.js for the browser', async ($,
   expect(own).toBe(data)
 })
 
+const USER_DIR = 'C:/Users/me/.claude/crew-graph'
+
+/** The mocks a character test needs: a home folder, a characters folder holding what `files` says, and every write recorded. */
+function charactersHost(on: On, files: Record<string, string>) {
+  const written = new Map<string, string>()
+  const norm = (p: string) => p.replace(/\\/g, '/')
+  on('env.get', (_$, e) => ({ value: e.name === 'USERPROFILE' ? String.raw`C:\Users\me` : e.name === 'OS' ? 'Windows_NT' : undefined }))
+  on('fs.read', (_$, e) => {
+    const name = norm(e.path).split('/').pop() ?? ''
+    if (norm(e.path).startsWith(`${USER_DIR}/characters/`)) return { value: e.as === 'bytes' ? { base64: btoa(files[name] ?? '') } : (files[name] ?? '') }
+    return { value: `// ${e.path}` }
+  })
+  on('fs.write', (_$, e) => {
+    written.set(norm(e.path), e.text)
+    return { value: undefined }
+  })
+  on('fs.exists', (_$, e) => ({ value: written.has(norm(e.path)) }))
+  on('fs.list', (_$, e) => ({
+    value: norm(e.path) === `${USER_DIR}/characters` ? Object.keys(files).map(name => ({ name, kind: 'file' as const, size: files[name]?.length ?? 0, mtimeMs: 5000, isLink: false })) : [],
+  }))
+  on('process.run', () => ({ value: { exitCode: 0, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }))
+  on('session.id', () => ({ value: 'sess-c' }))
+  return written
+}
+
+test('/crew web makes the characters folder with its README and writes the manifest the viewer loads', async ($, on) => {
+  engine(on)
+  const written = charactersHost(on, { 'mine.json': '{"id":"mine","bones":{"body":{"boxes":[]}}}', 'puff.glb': 'GLBDATA' })
+  await $.turn.start({ text: 'go', turnId: 'C1' })
+  await $.command.run({ command: 'crew', args: 'web noopen' } as never)
+  const readme = written.get(`${USER_DIR}/characters/README.txt`) ?? ''
+  expect(readme).toContain('crew-graph characters')
+  const manifest = written.get(`${USER_DIR}/characters-user.js`) ?? ''
+  expect(manifest).toContain('window.__crewUserCharacters = [')
+  expect(manifest).toContain('"id":"mine"')
+  expect(manifest).toContain('"glb":{"file":"characters/puff.glb","parts":1,"bytes":7}')
+  expect(written.get(`${USER_DIR}/characters-glb/puff.0.js`)).toContain(btoa('GLBDATA'))
+  // the viewer's own files go along: loader, character code, built-ins
+  for (const f of ['gltf-loader.classic.js', 'characters-core.js', 'characters.js']) expect(written.has(`${USER_DIR}/${f}`)).toBe(true)
+})
+
+test('/crew characters lists, /crew characters reload rescans and rewrites the manifest', async ($, on) => {
+  engine(on)
+  const written = charactersHost(on, { 'a.json': '{"id":"mybot","bones":{"body":{"boxes":[]}}}', 'broken.json': '{' })
+  await $.turn.start({ text: 'go', turnId: 'C2' })
+  const listed = await $.command.run({ command: 'crew', args: 'characters' } as never)
+  expect(listed.text).toContain('Built-in: crab')
+  expect(listed.text).toContain('mybot  voxel  a.json')
+  expect(listed.text).toContain('broken.json: not valid JSON')
+  expect(listed.text).toContain('every agent is a crab') // no option set
+  expect(written.has(`${USER_DIR}/characters-user.js`)).toBe(false) // listing writes nothing
+  const reloaded = await $.command.run({ command: 'crew', args: 'characters reload' } as never)
+  expect(reloaded.text).toContain('Rescanned')
+  expect(written.get(`${USER_DIR}/characters-user.js`)).toContain('"id":"mybot"')
+})
+
 test('a session title is its first prompt on one line, shortened, credentials masked', () => {
   expect(titleOf('  Refactor\nthe   loader\t please ')).toBe('Refactor the loader please')
   expect(titleOf('x'.repeat(80)).length).toBeLessThanOrEqual(32)

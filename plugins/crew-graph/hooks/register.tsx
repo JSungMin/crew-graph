@@ -63,12 +63,14 @@ import {
 } from './deck/core'
 import type { Config, Panel } from './deck/core'
 import { bigFrame, miniFrame, propFrame } from './clawd'
+import type { CharFs, Scan } from './characters'
+import { describeCharacters, ensureCharacterFolder, scanCharacters, writeCharacters } from './characters'
 import { absPath, clip, dataJs, describeCall, titleOf, pushEvent, shortPath, snapshotOf, touchFile, verbOfCard, scrollbar } from './crew'
 
 const PANE = 'crew-graph'
 const TITLE = 'Crew'
 const PANE_COLUMNS = 70
-const WEB_FILES = ['index.html', 'app.js', 'three.min.js', 'THREE_LICENSE.txt']
+const WEB_FILES = ['index.html', 'app.js', 'three.min.js', 'THREE_LICENSE.txt', 'gltf-loader.classic.js', 'characters-core.js', 'characters.js']
 const WEB_THROTTLE_MS = 450
 
 
@@ -236,6 +238,8 @@ async function noteMode($: EngineInterface, mode: string | undefined) {
 // ---------------------------------------------------------------- crew
 
 let cwd = ''
+/** The `characters` option as [who, character] pairs, for the snapshot. */
+let charRules: [string, string][] = []
 let webPending = false
 const WEB_OFF: Web = { isOn: false, dir: '', lastWriteAt: 0 }
 
@@ -323,6 +327,7 @@ async function writeWeb($: EngineInterface) {
     parents: pa,
     turn: t,
     receipt: r,
+    chars: charRules,
   })
   const text = dataJs(snap)
   await $.fs.write(`${w.dir}/data.js`, text).catch(() => undefined)
@@ -347,11 +352,41 @@ async function startWeb($: EngineInterface, shouldOpen: boolean): Promise<string
     const text = await $.fs.read(`${$.plugin.root}/web/${f}`).catch(() => null)
     if (typeof text === 'string') await $.fs.write(`${dir}/${f}`, text)
   }
+  await syncCharacters($, dir).catch(() => undefined)
   await update($, web, () => ({ isOn: true, dir, lastWriteAt: 0 }))
   await writeWeb($)
   const page = `${dir}/index.html`
   const where = shouldOpen ? await openInBrowser($, page) : ''
   return `Crew web view: ${page}${where}`
+}
+
+// ---------------------------------------------------------------- characters
+
+const charFs = ($: EngineInterface): CharFs => ({
+  list: p => $.fs.list(p),
+  read: p => $.fs.read(p),
+  readBytes: async p => (await $.fs.read(p, { as: 'bytes' })).base64,
+  write: (p, t) => $.fs.write(p, t),
+  exists: p => $.fs.exists(p),
+})
+
+/** Scans ~/.claude/crew-graph/characters/ and writes the manifest (and base64 parts of any GLB) the page loads. */
+async function syncCharacters($: EngineInterface, dir: string): Promise<Scan> {
+  const fs = charFs($)
+  const folder = `${dir}/characters`
+  await ensureCharacterFolder(fs, folder).catch(() => undefined)
+  const scan = await scanCharacters(fs, folder, true)
+  await writeCharacters(fs, dir, scan)
+  return scan
+}
+
+/** `/crew characters` lists; `/crew characters reload` rescans and rewrites what the page reads. */
+async function charactersCommand($: EngineInterface, spec: string, reload: boolean): Promise<string> {
+  const home = await homeDir($)
+  if (!home) return 'crew-graph: no home directory to keep characters in.'
+  const dir = `${home}/.claude/crew-graph`
+  const scan = reload ? await syncCharacters($, dir) : await scanCharacters(charFs($), `${dir}/characters`, false)
+  return describeCharacters(scan, spec, `${dir}/characters`, charRules, reload)
 }
 
 /** Inside Orca, a browser tab beside the terminal (full pixels, real mouse); else the system browser. */
@@ -378,7 +413,7 @@ const PET_POLL_MS = 1000
 
 const PET_HELP = [
   'Crew pet: the crabs on your desktop, with no background.',
-  '  drag a crab to carry it · click to pinch · stroke it to pet',
+  '  press a crab and pull to carry the window · shake it while carrying and it gets dizzy · click to pinch · stroke it (button up) to pet',
   '  right-drag to rotate · wheel to zoom · Ctrl+wheel or the corner grip to resize',
   '  click a file to open it · Shift+click shows it in the folder · right-click for the menu',
   '  the pill on top names this session (folder · first prompt); drag it to carry the window',
@@ -781,6 +816,7 @@ async function run3d($: EngineInterface, gen: number, cols: number, rows: number
 
 export const register: Register = (on, options) => {
   const cfg = parseConfig(options)
+  charRules = cfg.characterRules
   const C = PALETTES[cfg.palette]
   // tool.check carries no loop id; the tool.call around it does, keyed by the call's id.
   const callLoop = new Map<string, string | null>()
@@ -788,8 +824,8 @@ export const register: Register = (on, options) => {
   on('session.start', async ($, e, next) => {
     await $.command.register({
       name: 'crew',
-      description: 'Crew: the live agent dashboard with Clawd crabs; open, close, reset, layout, the 3D web view, or the desktop pet',
-      argumentHint: '[open|close|reset|layout auto|compact|wide|mini|web [off|noopen]|3d [off]|pet [off]]',
+      description: 'Crew: the live agent dashboard with Clawd crabs and other characters; open, close, reset, layout, the 3D web view, the desktop pet, or your own characters',
+      argumentHint: '[open|close|reset|layout auto|compact|wide|mini|web [off|noopen]|3d [off]|pet [off]|characters [reload]]',
     })
     await migrate($)
     cwd = String((e as { cwd?: string }).cwd ?? '')
@@ -832,6 +868,7 @@ export const register: Register = (on, options) => {
       const cols = Math.max(20, Math.min(240, Number(arg) || cfg.view3dColumns - 2))
       return { text: await start3d($, cols, cfg.view3dRows, cfg.view3dFps, cfg.view3dMode) }
     }
+    if (verb === 'characters') return { text: await charactersCommand($, cfg.characters, arg === 'reload') }
     if (verb === 'pet') return { text: arg === 'off' ? await petStop($, rest[0] === 'all') : await petStart($) }
     if (verb === 'web') {
       if (arg === 'off') {

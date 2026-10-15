@@ -121,6 +121,17 @@ const ANGER_TEX = canvasTex(64, 64, (c) => {
     for (let i = 0; i < 4; i++) { c.save(); c.rotate(i * Math.PI / 2); c.beginPath(); c.arc(-17, -17, 14, 0.1, Math.PI / 2 - 0.1); c.stroke(); c.restore(); }
   });
 });
+// yellow star and blue sweat drop for the shaken / dizzy crab
+const STAR_TEX = canvasTex(64, 64, (c) => {
+  c.translate(32, 33); c.beginPath();
+  for (let i = 0; i < 10; i++) { const r = i % 2 ? 11 : 27, an = -Math.PI / 2 + i * Math.PI / 5; c.lineTo(Math.cos(an) * r, Math.sin(an) * r); }
+  c.closePath(); c.lineWidth = 5; c.lineJoin = 'round'; c.strokeStyle = 'rgba(120,80,0,.9)'; c.stroke(); c.fillStyle = '#ffe14d'; c.fill();
+});
+const DROP_TEX = canvasTex(64, 64, (c) => {
+  c.beginPath(); c.moveTo(32, 6); c.bezierCurveTo(48, 28, 52, 38, 44, 50); c.bezierCurveTo(38, 60, 26, 60, 20, 50); c.bezierCurveTo(12, 38, 16, 28, 32, 6); c.closePath();
+  c.lineWidth = 5; c.strokeStyle = 'rgba(10,60,120,.9)'; c.stroke(); c.fillStyle = '#7fd4ff'; c.fill();
+  c.fillStyle = 'rgba(255,255,255,.65)'; c.beginPath(); c.ellipse(26, 40, 4, 7, 0.4, 0, 6.2832); c.fill();
+});
 const TINT = { failed: new T.Color(0xc42f2f), done: new T.Color(0x7a6a64), killed: new T.Color(0x6b6b6b), dim: new T.Color(0x8a7f78) };
 
 /* ---------------------------------------------------------------- labels */
@@ -166,49 +177,325 @@ const P = {};
 const sessionHue = () => hash(petSession || (lastSnap && lastSnap.session && lastSnap.session.cwd) || 'crew') % 360;
 const sessionHsl = (l) => 'hsl(' + sessionHue() + ',70%,' + l + '%)';
 function sessionRgb() { const c = new T.Color(); c.setHSL(sessionHue() / 360, 0.7, 0.6); return `${Math.round(c.r * 255)},${Math.round(c.g * 255)},${Math.round(c.b * 255)}`; }
+/* ---------------------------------------------------------------- characters: one rig, many looks */
+// A character is a set of named bones (CC.RIG) with boxes (a voxel character: window.__crewCharacters, window.__crewUserCharacters)
+// or a skinned GLB whose nodes carry those names. All animation below sets bones by name and skips the ones a character lacks.
+const CC = window.CrewCharCore;
+const CHARS = new Map();      // id -> record { id, name, kind: 'voxel' | 'glb', user, def, glb, state, gltf }
+let charIds = [];             // every declared id, built-ins first (the pool for the stable hash pick)
+let charRules = CC.parseRules(params.get('chars') || ''); // [[who, id], ...]: ?chars= here, the snapshot's `chars` when it brings one
+let charSig = '';
+const DEFAULT_GAIT = { legL1: 0, legL2: 1, legL3: 2, legR3: 1, legR2: 2, legR1: 3 };
+const boneOf = (o) => ({ o, px: o.position.x, py: o.position.y, pz: o.position.z, rx: o.rotation.x, ry: o.rotation.y, rz: o.rotation.z, qa: null, qb: null, kpos: 1, });
+
+const glbKeep = new Map();   // id|rev -> the record of a GLB already loaded, so a reload of the manifest does not parse it again
+function loadCharacters() {
+  const was = charIds.join();
+  CHARS.clear();
+  const add = (raw, user) => {
+    try {
+      if (!raw || typeof raw !== 'object') return;
+      if (raw.glb || raw.kind === 'glb') {
+        const id = String(raw.id || '');
+        if (!CC.CHAR_ID.test(id)) return;
+        const old = glbKeep.get(id + '|' + (raw.rev || ''));
+        CHARS.set(id, old || { id, name: String(raw.name || id).slice(0, 60), kind: 'glb', user: true, glb: { file: String(raw.glb && raw.glb.file || raw.file || ''), parts: +(raw.glb && raw.glb.parts || raw.parts) || 0, rev: String(raw.rev || '') }, state: 'idle', gltf: null });
+        glbKeep.set(id + '|' + (raw.rev || ''), CHARS.get(id));
+        return;
+      }
+      const r = CC.normalizeDef(raw.json || raw);
+      if (!r.def) { if (window.console) console.warn('crew-graph character ' + (raw.file || raw.id || '?') + ': ' + r.warnings.join('; ')); return; }
+      if (r.warnings.length && window.console) console.warn('crew-graph character ' + r.def.id + ': ' + r.warnings.join('; '));
+      CHARS.set(r.def.id, { id: r.def.id, name: r.def.name, kind: 'voxel', user, def: r.def, state: 'ready' });
+    } catch (err) { if (window.console) console.warn('crew-graph character skipped', err); }
+  };
+  (window.__crewCharacters || []).forEach((r) => add(r, false));
+  (window.__crewUserCharacters || []).forEach((r) => add(r, true));
+  if (!CHARS.has('crab')) CHARS.set('crab', { id: 'crab', name: 'crab', kind: 'voxel', user: false, def: CC.normalizeDef({ id: 'crab', bones: { body: { boxes: [{ size: [7, 3, 4], at: [0, 2, 0], color: '#e0855e' }] } } }).def, state: 'ready' });
+  // The built-ins first in their own order, then the user's by name: the pool for the hash pick stays put when a pack is added.
+  charIds = [...CHARS.keys()].sort((x, y) => (CHARS.get(x).user - CHARS.get(y).user) || (CHARS.get(x).user ? (x < y ? -1 : 1) : 0));
+  const builtin = (window.__crewCharacters || []).map((d) => d && d.id).filter((id) => CHARS.has(id));
+  charIds = [...new Set([...builtin, ...charIds])];
+  return was !== charIds.join();
+}
+
+function charIdFor(d) {
+  if (params.get('demo') === 'lineup' && CHARS.has(d.type)) return d.type;
+  return CC.chooseCharacter(charRules, d, charIds) || 'crab';
+}
+// The agents whose character is not the one their rules ask for (a pack arrived, the rules changed) are redrawn.
+function reskinAll() {
+  agents.forEach((a) => { const w = charIdFor(a.d); if (a.wantId !== w) { a.wantId = w; } mountWanted(a); });
+}
+function mountWanted(a) {
+  const rec = CHARS.get(a.wantId || 'crab') || CHARS.get('crab');
+  if (a.chId === rec.id) return;
+  if (rec.kind === 'glb') { ensureGlb(rec); if (rec.state !== 'ready') { if (!a.ch) mountChar(a, CHARS.get('crab')); return; } }
+  mountChar(a, rec);
+}
+
+/* ---- GLB: the bytes come as base64 script parts written by the mod (characters-glb/<id>.<n>.js), else from the file itself */
+const glbParts = {};
+window.__crewGlbPart = (id, n, b64) => { (glbParts[id] = glbParts[id] || [])[n] = String(b64 || ''); };
+function ensureGlb(rec) {
+  if (rec.state !== 'idle') return;
+  rec.state = 'loading';
+  const fail = (why) => { rec.state = 'error'; rec.err = why; if (window.console) console.warn('crew-graph glb ' + rec.id + ': ' + why); };
+  const parse = (buf) => {
+    if (!T.GLTFLoader) return fail('GLTFLoader is not loaded');
+    try {
+      new T.GLTFLoader().parse(buf, '', (g) => { rec.gltf = g; rec.state = 'ready'; reskinAll(); }, (e) => fail(String(e && e.message || e)));
+    } catch (e) { fail(String(e && e.message || e)); }
+  };
+  const fromFile = () => {
+    if (!rec.glb.file) return fail('no data and no file');
+    const x = new XMLHttpRequest();
+    x.open('GET', rec.glb.file + '?t=' + Date.now()); x.responseType = 'arraybuffer';
+    x.onload = () => { if ((x.status === 200 || x.status === 0) && x.response && x.response.byteLength) { rec.via = 'file'; parse(x.response); } else fail('cannot read ' + rec.glb.file + ' (' + x.status + ')'); };
+    x.onerror = () => fail('cannot read ' + rec.glb.file + ' from this page');
+    x.send();
+  };
+  const n = rec.glb.parts;
+  if (!(n > 0)) return fromFile();
+  let left = n;
+  const done = () => {
+    if (--left > 0) return;
+    const parts = glbParts[rec.id] || [];
+    if (parts.length !== n || parts.some((p) => !p)) return fromFile();
+    try {
+      const bin = atob(parts.join('')), u8 = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
+      rec.via = 'base64'; delete glbParts[rec.id];
+      parse(u8.buffer);
+    } catch (e) { fail('bad base64 data'); }
+  };
+  for (let i = 0; i < n; i++) {
+    const sc = document.createElement('script');
+    sc.src = 'characters-glb/' + rec.id + '.' + i + '.js?r=' + encodeURIComponent(rec.glb.rev);
+    sc.onload = () => { sc.remove(); done(); }; sc.onerror = () => { sc.remove(); done(); };
+    document.head.appendChild(sc);
+  }
+}
+// SkeletonUtils.clone, for a skinned model each agent needs its own copy of
+function cloneSkinned(source) {
+  const srcOf = new Map(), cloneOf = new Map(), clone = source.clone();
+  const walk = (a, b) => { srcOf.set(b, a); cloneOf.set(a, b); for (let i = 0; i < a.children.length; i++) walk(a.children[i], b.children[i]); };
+  walk(source, clone);
+  clone.traverse((n) => {
+    if (!n.isSkinnedMesh) return;
+    const s = srcOf.get(n);
+    n.skeleton = s.skeleton.clone();
+    n.bindMatrix.copy(s.bindMatrix);
+    n.skeleton.bones = s.skeleton.bones.map((bn) => cloneOf.get(bn));
+    n.bind(n.skeleton, n.bindMatrix);
+  });
+  return clone;
+}
+
+/* ---- building a character into the agent's body group */
+function newChar(rec) {
+  return { id: rec.id, rec, b: {}, tinted: [], mats: [], eyes: { eyeL: null, eyeR: null }, legs: [], glb: false, armBase: 0, travel: 1, scale: 1, top: 4.7, crown: 4.7, bw: 7, hitY: 2.35, hitR: 1, shadow: [8.5, 6.5], ringR: 6.8,
+    page: [0, 2.5, 3.2], hat: [0, 5.05, 0], hatS: 1, anten: [0, 5.9, 0], antenSp: 1.5, sleepyEyes: false, base: new T.Color(0xe0855e), disp: [], skel: [] };
+}
+function clearChar(a) {
+  const ch = a.ch; if (!ch) return;
+  while (a.body.children.length) a.body.remove(a.body.children[0]);
+  ch.mats.forEach((m) => m.dispose());
+  ch.skel.forEach((s) => s.dispose());
+  if (a.pageMat) a.pageMat.dispose();
+  if (a.tipMat) a.tipMat.dispose();
+  a.ch = null;
+}
+function genEyes(open) { // default expression boxes for the left eye from its open boxes
+  const o = open[0] || { size: [1, 1, 0.3], color: '#222222' }, w = o.size[0], h = o.size[1], d = o.size[2];
+  const t = Math.max(0.2, Math.min(w, h) * 0.32 + 0.04), len = Math.max(w, h) * 1.15, ex = { unlit: o.unlit, fixed: o.fixed };
+  const bx = (sz, at, rot, col) => Object.assign({ size: sz, at, rot: [0, 0, rot], color: col || o.color }, ex);
+  const out = {
+    x: [bx([len, t, d], [0, 0, 0.03], 0.785, o.unlit ? '#ff5c5c' : '#3a0d0d'), bx([len, t, d], [0, 0, 0.03], -0.785, o.unlit ? '#ff5c5c' : '#3a0d0d')],
+    squint: [bx([w * 1.2, t, d], [-0.1 * w, -0.25 * h, 0.03], 0.55), bx([w * 1.2, t, d], [-0.1 * w, 0.25 * h, 0.03], -0.55)],
+    happy: [bx([w, t, d], [-0.38 * w, -0.04 * h, 0.03], 0.7), bx([w, t, d], [0.38 * w, -0.04 * h, 0.03], -0.7)],
+    dizzy: [],
+  };
+  const R0 = Math.max(w, h) * 0.52;
+  for (let i = 0; i < 8; i++) { const an = i * 1.1, r = R0 * (0.12 + 0.125 * i); out.dizzy.push(bx([t * 0.85, t * 0.85, d], [Math.cos(an) * r, Math.sin(an) * r, 0.03], 0)); }
+  return out;
+}
+function buildVoxel(a, rec) {
+  const def = rec.def, isMain = a.d.id === 'main', ch = newChar(rec);
+  ch.scale = def.scale; ch.travel = def.travel != null ? def.travel : 1;
+  const col = ch.base;
+  if (def.base) col.setHSL((def.base.h + (isMain || !def.base.spread ? 0 : (CC.hash(a.d.type) % (2 * def.base.spread + 1)) - def.base.spread)) / 360, def.base.s, def.base.l);
+  else { const f = Object.values(def.bones).flatMap((bd) => bd.boxes).find((x) => x.color !== '@base' && !x.unlit); col.set(f ? f.color : '#c9c4d4'); }
+  const cache = new Map();
+  const matOf = (bx, eye) => {
+    const hex = bx.color === '@base' ? null : bx.color, fixed = bx.unlit || (bx.fixed !== undefined ? bx.fixed : eye);
+    const key = (bx.unlit ? 'u' : fixed ? 'f' : 't') + (hex || '@');
+    let m = cache.get(key);
+    if (m) return m;
+    if (bx.unlit) m = new T.MeshBasicMaterial({ color: new T.Color(hex || '#ffffff') });
+    else {
+      m = new T.MeshLambertMaterial({ color: hex ? new T.Color(hex) : col.clone(), flatShading: true });
+      if (!fixed) ch.tinted.push({ m, base: hex ? new T.Color(hex) : col }); // '@base' follows a.base, which the links read too
+    }
+    ch.mats.push(m); cache.set(key, m);
+    return m;
+  };
+  const addBox = (bx, parent, eye) => {
+    const o = new T.Mesh(BOX, matOf(bx, eye));
+    o.scale.set(bx.size[0], bx.size[1], bx.size[2]); o.position.set(bx.at[0], bx.at[1], bx.at[2]);
+    if (bx.rot) o.rotation.set(bx.rot[0], bx.rot[1], bx.rot[2]);
+    parent.add(o);
+  };
+  const flip = (bx) => Object.assign({}, bx, { at: [-bx.at[0], bx.at[1], bx.at[2]], rot: bx.rot ? [bx.rot[0], -bx.rot[1], -bx.rot[2]] : undefined });
+  const wp = { root: [0, 0, 0], body: [0, 0, 0] }, lo = [1e9, 1e9, 1e9], hi = [-1e9, -1e9, -1e9], cr = [-1e9], bwx = [1e9, -1e9];
+  const track = (n, bx) => {
+    const c = [wp[n][0] + bx.at[0], wp[n][1] + bx.at[1], wp[n][2] + bx.at[2]];
+    for (let i = 0; i < 3; i++) { lo[i] = Math.min(lo[i], c[i] - bx.size[i] / 2); hi[i] = Math.max(hi[i], c[i] + bx.size[i] / 2); }
+    if (n !== 'earL' && n !== 'earR' && n !== 'tail') cr[0] = Math.max(cr[0], c[1] + bx.size[1] / 2);
+    if (n === 'body' || n === 'head') { bwx[0] = Math.min(bwx[0], c[0] - bx.size[0] / 2); bwx[1] = Math.max(bwx[1], c[0] + bx.size[0] / 2); }
+  };
+  ch.b.root = boneOf(a.root); ch.b.body = boneOf(a.body);
+  def.bones.body.boxes.forEach((bx) => { addBox(bx, a.body, false); track('body', bx); });
+  const todo = Object.keys(def.bones).filter((n) => n !== 'body' && n !== 'root');
+  for (let guard = 0; todo.length && guard < 40; guard++) {
+    for (let i = 0; i < todo.length; i++) {
+      const n = todo[i], bd = def.bones[n], pn = bd.parent && def.bones[bd.parent] ? bd.parent : 'body';
+      if (!ch.b[pn]) continue;
+      const g = new T.Group(); g.position.set(bd.at[0], bd.at[1], bd.at[2]);
+      if (bd.rot) g.rotation.set(bd.rot[0], bd.rot[1], bd.rot[2]);
+      ch.b[pn].o.add(g);
+      wp[n] = [wp[pn][0] + bd.at[0], wp[pn][1] + bd.at[1], wp[pn][2] + bd.at[2]];
+      const bone = ch.b[n] = boneOf(g);
+      const eye = n === 'eyeL' || n === 'eyeR';
+      let open = g;
+      if (eye) { open = new T.Group(); g.add(open); ch.eyes[n] = { bone, open, v: {} }; }
+      bd.boxes.forEach((bx) => { addBox(bx, open, eye); track(n, bx); });
+      if (/^leg[LR]\d$/.test(n)) ch.legs.push({ b: bone, g: bd.gait != null ? bd.gait : DEFAULT_GAIT[n] });
+      todo.splice(i--, 1);
+    }
+  }
+  // expressions: the character's own boxes where it gave them, generated ones where it did not (sleepy only when given)
+  const baseOpen = (def.bones.eyeL || def.bones.eyeR || { boxes: [] }).boxes;
+  const gen = genEyes(baseOpen), ev = {};
+  CC.EYE_VARIANTS.forEach((k) => { ev[k] = def.eyes[k] || gen[k]; });
+  ch.sleepyEyes = !!def.eyes.sleepy;
+  ['eyeL', 'eyeR'].forEach((n) => {
+    const e = ch.eyes[n]; if (!e) return;
+    CC.EYE_VARIANTS.forEach((k) => {
+      if (!ev[k]) return;
+      const grp = new T.Group(); grp.visible = false; e.bone.o.add(grp);
+      ev[k].forEach((bx) => addBox(n === 'eyeR' ? flip(bx) : bx, grp, true));
+      e.v[k] = grp;
+    });
+  });
+  ch.top = hi[1]; ch.crown = cr[0]; ch.bw = Math.max(1, bwx[1] - bwx[0]);
+  const wid = hi[0] - lo[0], dep = hi[2] - lo[2];
+  ch.hitY = def.hit && def.hit.y != null ? def.hit.y : ch.top * 0.5;
+  ch.hitR = def.hit && def.hit.r != null ? def.hit.r : clamp((wid / 11.2 + ch.top / 4.7) / 2, 0.6, 1.5);
+  ch.shadow = def.shadow || [clamp(wid * 0.85, 5.5, 14), clamp(dep * 1.25, 5, 10)];
+  ch.ringR = clamp(Math.max(ch.shadow[0], ch.shadow[1]) * 0.8, 5, 12);
+  const pr = def.props || {}, hw = ch.bw;
+  ch.page = pr.page ? pr.page.at : [0, ch.top * 0.5, hi[2] + 1];
+  ch.hat = pr.hat ? pr.hat.at : [0, ch.crown + 0.35, 0]; ch.hatS = pr.hat ? pr.hat.s : clamp(hw / 7, 0.6, 1.3);
+  ch.anten = pr.anten ? pr.anten.at : [0, ch.crown + 1.2, 0]; ch.antenSp = pr.anten ? pr.anten.spread : hw * 0.214;
+  ch.wp = wp;
+  return ch;
+}
+function buildGlb(a, rec) {
+  const ch = newChar(rec), clone = cloneSkinned(rec.gltf.scene);
+  ch.glb = true; ch.armBase = 0.25; ch.travel = 0.6;
+  const fit = new T.Group(); fit.add(clone); // measured on its own: not yet in the agent, whose world transform would leak into the numbers
+  fit.updateMatrixWorld(true);
+  const names = []; clone.traverse((o) => { if (o !== clone && o.name) names.push(o.name); });
+  const mt = CC.matchRig(names), node = new Map();
+  clone.traverse((o) => { if (o.name && !node.has(o.name)) node.set(o.name, o); });
+  const box = new T.Box3().setFromObject(clone, true);
+  if (box.isEmpty()) return buildVoxel(a, CHARS.get('crab'));
+  // a model that faces -z (its eyes are behind its middle) is turned around
+  const eyeZ = ['eyeL', 'eyeR'].map((n) => node.get(mt.bones[n])).filter(Boolean).map((o) => new T.Vector3().setFromMatrixPosition(o.matrixWorld).z);
+  const flipY = eyeZ.length && (eyeZ.reduce((x, y) => x + y, 0) / eyeZ.length) < (box.min.z + box.max.z) / 2 - 0.02 * (box.max.z - box.min.z);
+  if (flipY) { clone.rotation.y = Math.PI; fit.updateMatrixWorld(true); box.setFromObject(clone, true); }
+  const sz = box.getSize(new T.Vector3()), ct = box.getCenter(new T.Vector3());
+  const k = Math.min(7.5 / Math.max(sz.x, sz.z, 1e-6), 6.5 / Math.max(sz.y, 1e-6));
+  fit.scale.setScalar(k);
+  clone.position.set(clone.position.x - ct.x, clone.position.y - box.min.y, clone.position.z - ct.z);
+  fit.updateMatrixWorld(true);
+  // each rig bone: where its parent sits relative to the model, so a turn about the character's axes can be mapped into the bone's own frame
+  const inv = new T.Matrix4().copy(clone.matrixWorld).invert(), Fq = clone.quaternion.clone(), Fi = Fq.clone().invert();
+  ch.b.root = boneOf(a.root); ch.b.body = boneOf(a.body);
+  Object.keys(mt.bones).forEach((rg) => {
+    const o = node.get(mt.bones[rg]); if (!o || rg === 'root' || rg === 'body') return;
+    const bone = boneOf(o), pm = new T.Matrix4().multiplyMatrices(inv, o.parent ? o.parent.matrixWorld : clone.matrixWorld);
+    const pp = new T.Vector3(), pq = new T.Quaternion(), ps = new T.Vector3();
+    pm.decompose(pp, pq, ps);
+    const q0 = o.quaternion.clone();
+    bone.qa = pq.clone().invert().multiply(Fi);         // character frame -> this bone's parent frame
+    bone.qb = Fq.clone().multiply(pq).multiply(q0);     // ... and back, with the bone's rest turn
+    bone.kpos = 1 / (k * Math.max(1e-6, ps.x));
+    bone.q0 = q0; bone.sx = o.scale.x; bone.sy = o.scale.y; bone.sz = o.scale.z;
+    const wq = new T.Quaternion(); o.getWorldQuaternion(wq);
+    bone.aligned = 2 * Math.acos(clamp(Math.abs(wq.w), 0, 1)) < 0.6; // its own axes line up with the model's: a blink can squash y alone
+    ch.b[rg] = bone;
+    if (/^leg[LR]\d$/.test(rg)) ch.legs.push({ b: bone, g: DEFAULT_GAIT[rg] });
+  });
+  ['eyeL', 'eyeR'].forEach((n) => {
+    const bone = ch.b[n]; if (!bone) return;
+    const e = ch.eyes[n] = { bone, open: null, v: {} };
+    const vs = mt.variants[n] || {};
+    CC.EYE_VARIANTS.forEach((kk) => { const o = vs[kk] && node.get(vs[kk]); if (o) { o.visible = false; e.v[kk] = o; } });
+  });
+  ch.sleepyEyes = !!(ch.eyes.eyeL && ch.eyes.eyeL.v.sleepy);
+  // look: every material cloned (the agents tint them separately), metal tamed (no environment map here), no culling of skinned parts
+  let basec = null;
+  clone.traverse((o) => {
+    if (o.isSkinnedMesh && o.skeleton) ch.skel.push(o.skeleton);
+    if (!o.isMesh) return;
+    o.frustumCulled = false;
+    const list = Array.isArray(o.material) ? o.material : [o.material], out = list.map((m0) => {
+      const m = m0.clone();
+      if (m.metalness !== undefined) m.metalness = Math.min(m.metalness, 0.2);
+      if (m.color) { ch.tinted.push({ m, base: m.color.clone() }); if (!basec && m.color.getHSL({ h: 0, s: 0, l: 0 }).l < 0.93) basec = m.color.clone(); }
+      ch.mats.push(m);
+      return m;
+    });
+    o.material = Array.isArray(o.material) ? out : out[0];
+  });
+  ch.base.copy(basec || new T.Color().setHSL((CC.hash(a.d.type) % 360) / 360, 0.5, 0.6));
+  const w = sz.x * k, h = sz.y * k, d = sz.z * k;
+  ch.top = h; ch.crown = h; ch.bw = Math.min(w, 7);
+  ch.hitY = h * 0.5; ch.hitR = clamp((w / 11.2 + h / 4.7) / 2, 0.6, 1.5);
+  ch.shadow = [clamp(w * 0.9, 5.5, 14), clamp(d * 1.3, 5, 10)]; ch.ringR = clamp(Math.max(ch.shadow[0], ch.shadow[1]) * 0.8, 5, 12);
+  ch.page = [0, h * 0.5, d / 2 + 1]; ch.hat = [0, h + 0.35, 0]; ch.hatS = clamp(ch.bw / 7, 0.6, 1.3); ch.anten = [0, h + 1.2, 0]; ch.antenSp = ch.bw * 0.214;
+  ch.wp = {};
+  a.body.add(fit);
+  return ch;
+}
+function mountChar(a, rec) {
+  clearChar(a);
+  const ch = rec.kind === 'glb' ? buildGlb(a, rec) : buildVoxel(a, rec);
+  a.ch = ch; a.chId = ch.id; a.bn = ch.b; a.base = ch.base; a.cs = ch.scale; a.s = a.s0 * ch.scale; a.h = ch.hitY * a.s;
+  // props: the page a reading crab holds, the architect's hat, the web antenna; they sit on the body (the hat and antenna on the head if there is one)
+  const hd = ch.b.head && ch.wp.head ? ch.b.head.o : a.body, off = hd === a.body ? [0, 0, 0] : ch.wp.head;
+  const V = (w, hh, dd, x, y, z, m, p) => { const o = new T.Mesh(BOX, m); o.scale.set(w, hh, dd); o.position.set(x, y, z); p.add(o); return o; };
+  a.tipMat = new T.MeshBasicMaterial({ color: 0x66e6ff });
+  a.anten = new T.Group(); a.anten.visible = false; a.anten.position.set(ch.anten[0] - off[0], ch.anten[1] - off[1], ch.anten[2] - off[2]); hd.add(a.anten);
+  [-1, 1].forEach((sg) => { V(0.3, 1.8, 0.3, sg * ch.antenSp, 0, 0, ch.mats.length ? ch.mats[0] : M.eye, a.anten); V(0.7, 0.7, 0.7, sg * ch.antenSp, 1.1, 0, a.tipMat, a.anten); });
+  a.hat = new T.Group(); a.hat.visible = !!a.d.isArchitect; a.hat.position.set(ch.hat[0] - off[0], ch.hat[1] - off[1], ch.hat[2] - off[2]); a.hat.scale.setScalar(ch.hatS); hd.add(a.hat);
+  V(3.2, 0.7, 3.2, 0, 0, 0, M.hat, a.hat); V(2, 0.9, 2, 0, 0.75, 0, M.hat, a.hat); V(0.9, 0.7, 0.9, 0, 1.45, 0, M.hat, a.hat);
+  a.page = new T.Group(); a.page.position.set(ch.page[0], ch.page[1], ch.page[2]); a.page.rotation.x = -0.35; a.page.visible = false; a.body.add(a.page);
+  a.pageMat = M.page.clone();
+  V(2.6, 3.2, 0.15, 0, 0, 0, a.pageMat, a.page);
+  [0.9, 0.3, -0.3, -0.9].forEach((y) => V(1.8, 0.14, 0.05, 0, y, 0.1, M.ink, a.page));
+  // the antenna's poles take the body colour
+  if (ch.tinted.length) a.anten.children.forEach((o) => { if (o.material !== a.tipMat) o.material = ch.tinted[0].m; });
+  a.shadow.scale.set(ch.shadow[0], 1, ch.shadow[1]); a.ring.scale.setScalar(ch.ringR);
+}
+
 function makeCrab(d) {
   const isMain = d.id === 'main';
-  const s = isMain ? 0.42 : d.isArchitect ? 0.3 : 0.28;
+  const s0 = isMain ? 0.42 : d.isArchitect ? 0.3 : 0.28;
   const root = new T.Group(), body = new T.Group();
   body.rotation.order = 'YXZ'; root.add(body);
-  const col = new T.Color();
-  const h = isMain ? 14.8 / 360 : (14.8 + ((hash(d.type) % 31) - 15)) / 360;
-  col.setHSL(h, 0.68, 0.56);
-  const mat = new T.MeshLambertMaterial({ color: col.clone(), flatShading: true });
-  const V = (w, hh, dd, x, y, z, m, p) => { const o = new T.Mesh(BOX, m || mat); o.scale.set(w, hh, dd); o.position.set(x, y, z); (p || body).add(o); return o; };
-  V(7, 2.2, 4, 0, 2.3, 0);
-  V(5, 1.3, 4, 0, 4.05, 0);
-  const eyes = [], eyeM = [], xeyes = [];
-  [-1.5, 1.5].forEach((x) => {
-    const g = new T.Group(); g.position.set(x, 3.6, 2.05); body.add(g);
-    eyeM.push(V(1, 1.3, 0.3, 0, 0, 0, M.eye, g));
-    const xe = new T.Group(); xe.visible = false; g.add(xe);
-    [0.785, -0.785].forEach((r) => { const b = V(1.5, 0.32, 0.3, 0, 0, 0.05, M.xeye, xe); b.rotation.z = r; });
-    // pinched squint: left eye '>' right eye '<'
-    const sqz = new T.Group(); sqz.visible = false; g.add(sqz);
-    const sd = x < 0 ? 1 : -1;
-    [-1, 1].forEach((u) => { const b = V(1.2, 0.42, 0.3, -0.1 * sd, 0.32 * u, 0.05, M.eye, sqz); b.rotation.z = -0.55 * sd * u; });
-    // petted: both eyes '^'
-    const hap = new T.Group(); hap.visible = false; g.add(hap);
-    [-1, 1].forEach((u) => { const b = V(1.0, 0.42, 0.3, 0.38 * u, -0.05, 0.05, M.eye, hap); b.rotation.z = -0.7 * u; });
-    eyes.push({ g, x, xe, sqz, hap });
-  });
-  const arms = [-1, 1].map((sg) => {
-    const piv = new T.Group(); piv.position.set(sg * 3.5, 2.6, 0); body.add(piv);
-    V(1.7, 1.3, 1.5, sg * 0.85, 0, 0, mat, piv);
-    V(1.0, 0.9, 1.5, sg * 1.6, 0.85, 0, mat, piv);
-    return piv;
-  });
-  const legs = [-2.7, -1.1, 1.1, 2.7].map((x) => V(0.9, 1.2, 0.9, x, 0.6, 0));
-  const tipMat = new T.MeshBasicMaterial({ color: 0x66e6ff });
-  const anten = new T.Group(); anten.visible = false; body.add(anten);
-  [-1.5, 1.5].forEach((x) => { V(0.3, 1.8, 0.3, x, 5.9, 0, mat, anten); V(0.7, 0.7, 0.7, x, 7, 0, tipMat, anten); });
-  const hat = new T.Group(); hat.visible = !!d.isArchitect; body.add(hat);
-  V(3.2, 0.7, 3.2, 0, 5.05, 0, M.hat, hat); V(2, 0.9, 2, 0, 5.8, 0, M.hat, hat); V(0.9, 0.7, 0.9, 0, 6.5, 0, M.hat, hat);
-  const page = new T.Group(); page.position.set(0, 2.5, 3.2); page.rotation.x = -0.35; page.visible = false; body.add(page);
-  const pageMat = M.page.clone();
-  V(2.6, 3.2, 0.15, 0, 0, 0, pageMat, page);
-  [0.9, 0.3, -0.3, -0.9].forEach((y) => V(1.8, 0.14, 0.05, 0, y, 0.1, M.ink, page));
   const shadow = new T.Mesh(FLAT, M.shadow); shadow.scale.set(8.5, 1, 6.5); shadow.position.y = 0.03; shadow.renderOrder = 1; root.add(shadow);
   const ring = new T.Mesh(RING, M.sel); ring.scale.setScalar(6.8); ring.position.y = 0.06; ring.visible = false; root.add(ring);
   // The main crab stands in a soft ring in its session's colour: windows of several sessions tell apart at a glance.
@@ -217,15 +504,19 @@ function makeCrab(d) {
     sr.scale.set(11, 1, 11); sr.position.y = 0.05; sr.renderOrder = 1; root.add(sr);
   }
   const spr = (g) => { const m = new T.SpriteMaterial({ map: g, transparent: true, depthTest: false, fog: false }); const sp = new T.Sprite(m); sp.visible = false; sp.renderOrder = 9; root.add(sp); return sp; };
-  const fx = { z: [spr(GLYPH.z), spr(GLYPH.z), spr(GLYPH.z)], q: spr(GLYPH.q), bang: spr(GLYPH.bang) };
+  const fx = { z: [spr(GLYPH.z), spr(GLYPH.z), spr(GLYPH.z)], q: spr(GLYPH.q), bang: spr(GLYPH.bang), orb: [spr(STAR_TEX), spr(STAR_TEX), spr(STAR_TEX)] };
   const label = makeLabel(512, 128, isMain ? 1.05 : 0.85);
   scene.add(label.sp);
   root.scale.setScalar(0.001);
   scene.add(root);
   const cur = {}; POSE_KEYS.forEach((k) => { cur[k] = 0; }); cur.eyeSY = 1; cur.sq = 1; cur.aL = cur.aR = -0.25;
-  return { id: d.id, d, s, h: 2.7 * s, root, body, mat, base: col, eyes, eyeM, arms, legs, anten, tipMat, hat, page, pageMat, ring, fx, label, labelKey: '',
-    re: newReact(), mood: { pets: 0, pinches: 0 }, bub: overlay ? makeBubble() : null, look: 0, dim: 0, hiddenN: 0, chip: null,
+  const a = { id: d.id, d, s0, s: s0, cs: 1, h: 2.7 * s0, root, body, shadow, ring, fx, label, labelKey: '', ch: null, chId: '', wantId: 'crab', bn: {}, base: new T.Color(), hat: null, page: null, pageMat: null, anten: null, tipMat: null,
+    re: newReact(), mood: { pets: 0, pinches: 0 }, bub: overlay ? makeBubble() : null, look: 0, dim: 0, hiddenN: 0, chip: null, mo: 0, byPrev: 0, earV: 0, sp: newSprings(),
     pos: new T.Vector3(), tgt: new T.Vector3(), cur, enterT: nowS(), born: nowS(), lastVerb: '', tintF: 0, yaw: 0, ph: (hash(d.id) % 628) / 100, depth: 0, ang: 0, lv: 1 };
+  a.wantId = charIdFor(d);
+  mountWanted(a);
+  if (!a.ch) mountChar(a, CHARS.get('crab')); // a GLB still loading: the crab stands in, then the model replaces it
+  return a;
 }
 
 function effVerb(d) {
@@ -259,8 +550,37 @@ function poseTarget(v, t, lt) {
   if (v !== 'web' && v !== 'think' && v !== 'done' && v !== 'failed' && s(t * 0.9 + 1.3) > 0.985) P.eyeSY = 0.15;
 }
 
+const _qa = new T.Quaternion(), _ea = new T.Euler(), _va = new T.Vector3();
+// A turn about the character's own axes (x right, y up, z forward); a voxel bone is axis-aligned, a GLB bone is mapped into its own frame.
+function setRot(b, x, y, z) {
+  if (!b) return;
+  if (!b.qa) b.o.rotation.set(b.rx + x, b.ry + y, b.rz + z);
+  else { _ea.set(x, y, z); _qa.setFromEuler(_ea); b.o.quaternion.copy(b.qa).multiply(_qa).multiply(b.qb); }
+}
+// A push in the same frame, in the crab's units.
+function setOff(b, x, y, z) {
+  if (!b) return;
+  if (!b.qa) b.o.position.set(b.px + x, b.py + y, b.pz + z);
+  else { _va.set(x, y, z).applyQuaternion(b.qa).multiplyScalar(b.kpos); b.o.position.set(b.px + _va.x, b.py + _va.y, b.pz + _va.z); }
+}
+// An eye: the mode picks which set of boxes (or nodes) is shown; `open` is blinked by scaling it.
+function showEye(e, mode, esy, now, sg) {
+  const v = e.v;
+  if (e.open) { // a voxel eye: groups of boxes
+    e.open.visible = mode === 'open'; e.open.scale.y = esy;
+    for (const k in v) v[k].visible = k === mode;
+    if (mode === 'dizzy' && v.dizzy) v.dizzy.rotation.z = -sg * now * 9;
+    return;
+  }
+  const b = e.bone, vv = v[mode], closed = mode === 'open' ? esy : mode === 'dizzy' ? 0.3 + 0.7 * Math.abs(Math.sin(now * 9)) : mode === 'x' ? 0.05 : 0.14;
+  for (const k in v) v[k].visible = k === mode;
+  const sy = vv ? 0.02 : closed;
+  if (b.aligned) b.o.scale.set(b.sx, b.sy * sy, b.sz); else { const u = Math.sqrt(sy); b.o.scale.set(b.sx * u, b.sy * u, b.sz * u); }
+  if (vv && mode === 'dizzy') vv.rotation.z = -sg * now * 9;
+}
+
 function updateCrab(a, dt, t, camPos) {
-  const now = nowS();
+  const now = nowS(), ch = a.ch, B = a.bn;
   const v = effVerb(a.d);
   if (v !== a.lastVerb) { a.lastVerb = v; a.enterT = now; }
   const lt = now - a.enterT, tt = t + a.ph;
@@ -273,42 +593,82 @@ function updateCrab(a, dt, t, camPos) {
   a.body.rotation.set(c.rx + R.rx, c.ry + R.ry, c.rz + R.rz);
   const sxz = 1 + (1 - R.sy) * 0.45;
   a.body.scale.set(sxz, c.sq * R.sy, sxz);
-  a.arms[0].rotation.set(c.aLx, R.armY, -(c.aL + R.dA));
-  a.arms[1].rotation.set(c.aRx, -R.armY, c.aR + R.dA);
-  for (let i = 0; i < 4; i++) a.legs[i].position.y = 0.6 + c['l' + i] + R.lg[i];
-  const xe = v === 'failed';
+  // the rig: every bone is set by name, a character without the bone just skips the line
+  const ab = ch.armBase, al = c.aL + R.dA + R.dL + ab, ar = c.aR + R.dA + R.dR + ab;
+  setRot(B.armL, c.aLx, R.armY, -al);
+  setRot(B.armR, c.aRx, -R.armY, ar);
+  if (B.handL) setRot(B.handL, 0, 0, -0.3 * al);
+  if (B.handR) setRot(B.handR, 0, 0, 0.3 * ar);
+  for (let i = 0; i < ch.legs.length; i++) { const l = ch.legs[i]; setOff(l.b, 0, c['l' + l.g] + R.lg[l.g], 0); }
+  const mode = v === 'failed' ? 'x' : R.dizzy ? 'dizzy' : R.squint ? 'squint' : R.happy ? 'happy' : (ch.sleepyEyes && a.re.sleep > 0.7 ? 'sleepy' : 'open');
+  const esy = Math.max(0.05, c.eyeSY * R.esy);
   for (let i = 0; i < 2; i++) {
-    const e = a.eyes[i];
-    e.g.position.x = e.x + c.eyeX * 0.45 + R.ex;
-    const em = xe ? 0 : R.squint ? 1 : R.happy ? 2 : 3;
-    a.eyeM[i].visible = em === 3; e.xe.visible = xe; e.sqz.visible = em === 1; e.hap.visible = em === 2;
-    a.eyeM[i].scale.y = 1.3 * Math.max(0.05, c.eyeSY * R.esy);
+    const e = ch.eyes[i ? 'eyeR' : 'eyeL'];
+    if (!e) continue;
+    setOff(e.bone, (c.eyeX * 0.45 + R.ex) * ch.travel, 0, 0);
+    showEye(e, mode, esy, now, i ? -1 : 1);
+  }
+  if (B.head) setRot(B.head, 0.35 * (c.rx + R.rx) + R.headX + 0.04 * Math.sin(tt * 1.1), 0.5 * (c.ry + R.ry) + R.headY, 0.45 * (c.rz + R.rz) + R.headZ);
+  if (B.earL || B.earR) { // ears lag the body's bounce, droop when tired or flopped, and wiggle when happy
+    const vy = (a.body.position.y - a.byPrev) / Math.max(dt, 0.001); a.byPrev = a.body.position.y;
+    a.earV += (vy - a.earV) * (1 - Math.exp(-dt * 14));
+    const happy = Math.max(a.re.pet, R.happy ? 1 : 0);
+    const dr = clamp(a.earV * 0.035, -0.5, 0.5) + (v === 'failed' ? 0.9 : 0) + a.re.sleep * 0.45 + (v === 'think' ? 0.15 : 0) - 0.2 * happy + R.earX;
+    const wg = 0.07 * Math.sin(tt * 2.3) + 0.2 * happy * Math.sin(now * 14) + R.earZ;
+    setRot(B.earL, -dr, 0, wg); setRot(B.earR, -dr, 0, -wg);
+  }
+  if (B.tail) {
+    const hp = Math.max(a.re.pet, R.happy ? 1 : 0), run = v === 'run' ? 1 : 0;
+    const wag = (0.18 + 0.4 * hp + 0.25 * run) * Math.sin(tt * (3 + 9 * hp + 5 * run)) + R.tailW;
+    setRot(B.tail, 0.1 * Math.sin(tt * 1.7), wag, 0.4 * wag);
+  }
+  if (B.mouth) { // opens for a yelp, a yawn-ish think, a cheer
+    let mo = R.mouth;
+    if (R.squint || v === 'failed') mo = Math.max(mo, 0.9);
+    if (R.happy) mo = Math.max(mo, 0.5);
+    if (v === 'spawn') mo = Math.max(mo, 0.7);
+    if (v === 'plan' || v === 'think') mo = Math.max(mo, 0.25 * (0.5 + 0.5 * Math.sin(tt * 6)));
+    a.mo += (mo - a.mo) * (1 - Math.exp(-dt * 14));
+    const m = B.mouth, al2 = !m.qa || m.aligned;
+    if (al2) m.o.scale.set((m.sx || 1) * (1 + 0.2 * a.mo), (m.sy || 1) * (1 + 1.6 * a.mo), m.sz || 1); else m.o.scale.setScalar((m.sx || 1) * (1 + 0.5 * a.mo));
   }
   a.page.visible = v === 'read' || v === 'plan';
   if (a.page.visible) a.pageMat.color.setHex(v === 'plan' ? 0xe3d6ff : 0xf4f1e8);
   a.anten.visible = v === 'web';
   if (a.anten.visible) a.tipMat.color.setRGB(0.4, 0.9, 1).multiplyScalar(s01(Math.sin(t * 7)) * 0.9 + 0.1);
-  // glyph sprites
-  const F = a.fx;
+  // glyph sprites, placed from the top of the character (the crab's own is 4.7)
+  const F = a.fx, tp = ch.top;
   // zZ: while thinking, and in the pet while asleep
   const zk = v === 'think' ? 1 : a.re.sleep > 0.35 ? a.re.sleep : 0;
   for (let i = 0; i < 3; i++) {
     const sp = F.z[i], life = (t * (v === 'think' ? 0.45 : 0.28) + i / 3) % 1;
     sp.visible = zk > 0;
-    if (sp.visible) { sp.position.set(1.8 + life * 1.6, 5.6 + life * 3.4, 0.5); sp.scale.setScalar(1.2 + life * 1.4); sp.material.opacity = Math.sin(life * Math.PI) * 0.95 * zk; }
+    if (sp.visible) { sp.position.set(1.8 + life * 1.6, tp + 0.9 + life * 3.4, 0.5); sp.scale.setScalar(1.2 + life * 1.4); sp.material.opacity = Math.sin(life * Math.PI) * 0.95 * zk; }
   }
   F.q.visible = v === 'search';
-  if (F.q.visible) { F.q.position.set(2.2, 6.6 + 0.3 * Math.sin(t * 3), 0.5); F.q.scale.setScalar(2.4); F.q.material.rotation = 0.2 * Math.sin(t * 2); }
+  if (F.q.visible) { F.q.position.set(2.2, tp + 1.9 + 0.3 * Math.sin(t * 3), 0.5); F.q.scale.setScalar(2.4); F.q.material.rotation = 0.2 * Math.sin(t * 2); }
   F.bang.visible = v === 'spawn';
-  if (F.bang.visible) { F.bang.position.set(0, 7 + c.by, 0.5); F.bang.scale.setScalar(2.4); }
+  if (F.bang.visible) { F.bang.position.set(0, tp + 2.3 + c.by, 0.5); F.bang.scale.setScalar(2.4); }
+  for (let i = 0; i < 3; i++) { // dizzy: stars circling the head
+    const sp = F.orb[i], on = R.orbit > 0.02;
+    sp.visible = on;
+    if (on) { const an = now * 4.2 + i * 2.094, rr = Math.max(1.8, ch.bw * 0.4); sp.position.set(Math.cos(an) * rr, ch.crown + 0.9 + 0.25 * Math.sin(now * 6 + i), Math.sin(an) * rr * 0.7); sp.scale.setScalar(1.15); sp.material.opacity = R.orbit; }
+  }
   // tint
   const tf = v === 'failed' ? 0.75 : v === 'done' ? (lt > 1.5 ? 0.5 : 0.15) : a.d.status === 'killed' ? 0.7 : (a.d.status === 'idle' || a.d.status === 'pending') ? 0.12 : 0;
   a.tintF += (tf - a.tintF) * (1 - Math.exp(-dt * 4));
   const tc = v === 'failed' ? TINT.failed : a.d.status === 'killed' ? TINT.killed : v === 'done' ? TINT.done : TINT.dim;
-  a.mat.color.copy(a.base).lerp(tc, a.tintF);
   const re = a.re, eb = embed ? 1.4 : 1;
-  if (re.red > 0.01) a.mat.color.lerp(REDC, 0.4 * re.red);
-  a.mat.emissive.setRGB((0.32 * re.pet + 0.42 * re.red) * eb, (0.1 * re.pet + 0.02 * re.red) * eb, 0.17 * re.pet * eb);
+  const dimT = wire2 ? (relatedSet && !relatedSet.has('a:' + a.id) ? 1 : 0) : 0;
+  if (wire2) a.dim += (dimT - a.dim) * (1 - Math.exp(-dt * 8)); // hovering something dims every crab it has nothing to do with
+  const tr = a.dim > 0.02, em0 = (0.32 * re.pet + 0.42 * re.red) * eb, em1 = (0.1 * re.pet + 0.02 * re.red) * eb, em2 = 0.17 * re.pet * eb;
+  for (let i = 0; i < ch.tinted.length; i++) {
+    const m = ch.tinted[i].m;
+    m.color.copy(ch.tinted[i].base).lerp(tc, a.tintF);
+    if (re.red > 0.01) m.color.lerp(REDC, 0.4 * re.red);
+    if (m.emissive) m.emissive.setRGB(em0, em1, em2);
+    if (wire2) { if (m.transparent !== tr) m.transparent = tr; m.opacity = 1 - 0.65 * a.dim; }
+  }
   // placement
   a.pos.lerp(a.tgt, 1 - Math.exp(-dt * 3));
   a.root.position.copy(a.pos);
@@ -318,15 +678,8 @@ function updateCrab(a, dt, t, camPos) {
   a.root.rotation.y = a.yaw;
   const age = now - a.born;
   a.root.scale.setScalar(a.s * Math.max(0.001, easeOutBack(age / 0.55)));
-  a.label.sp.position.set(a.pos.x, a.s * 10.5 + 0.4, a.pos.z);
+  a.label.sp.position.set(a.pos.x, a.s * (tp + 5.8) + 0.4, a.pos.z);
   a.ring.visible = !!(selected === a.id || (hover && hover.o === a));
-  if (wire2) { // hovering something dims every crab it has nothing to do with
-    const dT = relatedSet && !relatedSet.has('a:' + a.id) ? 1 : 0;
-    a.dim += (dT - a.dim) * (1 - Math.exp(-dt * 8));
-    const tr = a.dim > 0.02;
-    if (a.mat.transparent !== tr) a.mat.transparent = tr;
-    a.mat.opacity = 1 - 0.65 * a.dim;
-  }
   if (a.bub) updateBubble(a, v, dt);
 }
 const s01 = (x) => x * 0.5 + 0.5;
@@ -341,11 +694,11 @@ function refreshCrabLabel(a) {
 function disposeCrab(a) {
   scene.remove(a.root); scene.remove(a.label.sp);
   for (let i = rfx.length - 1; i >= 0; i--) if (rfx[i].a === a) { rfxRelease(rfx[i]); rfx.splice(i, 1); }
-  a.mat.dispose(); a.pageMat.dispose(); a.tipMat.dispose();
+  clearChar(a);
   if (a.chip) { scene.remove(a.chip.sp); a.chip.tex.dispose(); a.chip.mat.dispose(); }
   if (a.bub) { scene.remove(a.bub.sp); a.bub.tex.dispose(); a.bub.mat.dispose(); }
   a.label.tex.dispose(); a.label.mat.dispose();
-  a.fx.z.forEach((s) => s.material.dispose()); a.fx.q.material.dispose(); a.fx.bang.material.dispose();
+  a.fx.z.forEach((s) => s.material.dispose()); a.fx.q.material.dispose(); a.fx.bang.material.dispose(); a.fx.orb.forEach((s) => s.material.dispose());
 }
 
 /* ---------------------------------------------------------------- reactions (pet / pinch) */
@@ -353,14 +706,18 @@ function disposeCrab(a) {
 // updateCrab adds it on top of the verb pose, so the pose smoothing underneath is never touched.
 const EM = embed ? 2 : 1; // the terminal shows a few pixels per crab: make effects twice as big
 const REDC = new T.Color(0xe02a1a);
-const RX = { by: 0, rx: 0, rz: 0, sy: 1, dA: 0, armY: 0, squint: false, happy: false, ry: 0, ex: 0, esy: 1, lg: [0, 0, 0, 0] };
+const RX = { by: 0, rx: 0, rz: 0, sy: 1, dA: 0, armY: 0, squint: false, happy: false, ry: 0, ex: 0, esy: 1, lg: [0, 0, 0, 0],
+  // from the character system: per-arm extra, dizzy eyes and stars, head / ear / tail / mouth drive
+  dL: 0, dR: 0, dizzy: false, orbit: 0, headX: 0, headY: 0, headZ: 0, earX: 0, earZ: 0, tailW: 0, mouth: 0 };
 const RFX_MAX = 60;
 const rfxPool = [], rfx = [];
 function newReact() {
   const n = nowS();
   return { pinchT: -99, pinchTimes: [], grumpT: -99, redUntil: 0, red: 0, petUntil: 0, pet: 0, nextHeart: 0, session: false, sessionT: 0, happyT: -99,
     // the pet's own: drop bounce, wobble, hello hop, wake-up stretch, blink, idle shuffle, sleep depth
-    dropT: -99, wobT: -99, hopT: -99, stretchT: -99, blinkAt: n + 1 + Math.random() * 4, blinkT: -99, shufAt: n + 3 + Math.random() * 8, shufT: -99, sleep: 0 };
+    dropT: -99, wobT: -99, hopT: -99, stretchT: -99, blinkAt: n + 1 + Math.random() * 4, blinkT: -99, shufAt: n + 3 + Math.random() * 8, shufT: -99, sleep: 0,
+    // shaken in the carried window: dizzy stagger (and a sit-down first after a hard shake), the next star / drop
+    dizzyT: -99, dizzyDur: 0, sitT: -99, sitDur: 0, starAt: 0 };
 }
 function rfxAcquire() {
   let sp = rfxPool.pop();
@@ -377,13 +734,18 @@ function rfxRelease(o) {
 }
 function spawnRfx(kind, a, delay) {
   const sp = rfxAcquire();
-  sp.material.map = kind === 'heart' ? HEART_TEX : kind === 'anger' ? ANGER_TEX : GLYPH.hurt;
+  sp.material.map = kind === 'heart' ? HEART_TEX : kind === 'anger' ? ANGER_TEX : kind === 'sweat' ? DROP_TEX : kind === 'star' ? STAR_TEX : GLYPH.hurt;
   sp.material.opacity = 0; sp.material.rotation = 0; sp.visible = false;
-  const o = { sp, k: kind, a, t0: nowS() + (delay || 0), dur: kind === 'heart' ? 1.15 : kind === 'anger' ? 1.4 : 0.95, ph: Math.random() * 6.283, size: 1, x0: 0, y0: 0, z0: 0 };
+  const o = { sp, k: kind, a, t0: nowS() + (delay || 0), dur: kind === 'heart' ? 1.15 : kind === 'anger' ? 1.4 : kind === 'sweat' ? 0.85 : kind === 'star' ? 0.95 : 0.95, ph: Math.random() * 6.283, size: 1, x0: 0, y0: 0, z0: 0, vx: 0, vy: 0 };
   if (kind === 'heart') {
     const off = (Math.random() * 2 - 1) * 2.2 * a.s * EM;
-    o.x0 = a.pos.x + Math.cos(a.yaw) * off; o.z0 = a.pos.z - Math.sin(a.yaw) * off; o.y0 = a.pos.y + a.s * 6.4;
+    o.x0 = a.pos.x + Math.cos(a.yaw) * off; o.z0 = a.pos.z - Math.sin(a.yaw) * off; o.y0 = a.pos.y + a.s * (a.ch.top + 1.7);
     o.size = (0.6 + Math.random() * 0.3) * EM * (0.75 + a.s);
+  } else if (kind === 'sweat' || kind === 'star') { // flung off the head, sideways and up
+    const sd = Math.random() < 0.5 ? -1 : 1;
+    o.x0 = a.pos.x + Math.cos(a.yaw) * sd * a.s * 3; o.z0 = a.pos.z - Math.sin(a.yaw) * sd * a.s * 3; o.y0 = a.pos.y + a.s * (a.ch.crown + 0.6);
+    o.vx = sd * (1.6 + Math.random() * 2.4) * (0.6 + a.s); o.vy = (kind === 'sweat' ? 2.2 : 3.2) + Math.random() * 2.2;
+    o.size = (kind === 'sweat' ? 0.75 : 0.85) * EM * (0.75 + a.s);
   } else o.size = (kind === 'anger' ? 1.2 : 1.0) * EM * (0.75 + a.s);
   rfx.push(o);
 }
@@ -398,9 +760,14 @@ function updateRfx(now) {
       sp.position.set(o.x0 + Math.sin(o.ph + u * 7) * 0.35 * EM, o.y0 + u * 2.4 * EM, o.z0);
       sp.scale.setScalar(o.size * Math.max(0.01, easeOutBack(Math.min(1, u * 5))));
       m.opacity = 1 - clamp((u - 0.6) / 0.4, 0, 1); m.rotation = 0.25 * Math.sin(o.ph + u * 5);
+    } else if (o.k === 'sweat' || o.k === 'star') {
+      const tau = u * o.dur;
+      sp.position.set(o.x0 + Math.cos(a.yaw) * o.vx * tau, o.y0 + o.vy * tau - 5 * tau * tau, o.z0 - Math.sin(a.yaw) * o.vx * tau);
+      sp.scale.setScalar(o.size * Math.max(0.01, easeOutBack(Math.min(1, u * 6))));
+      m.opacity = 1 - clamp((u - 0.55) / 0.45, 0, 1); m.rotation = o.k === 'star' ? tau * 7 : 0;
     } else {
       const side = o.k === 'anger' ? 2.4 * a.s : 0, pul = o.k === 'anger' ? 1 + 0.14 * Math.sin(u * 48) : 1;
-      sp.position.set(a.pos.x + Math.cos(a.yaw) * side, a.pos.y + a.s * (7.4 + a.body.position.y) + (o.k === 'anger' ? 0.5 : 0.3) * EM, a.pos.z - Math.sin(a.yaw) * side);
+      sp.position.set(a.pos.x + Math.cos(a.yaw) * side, a.pos.y + a.s * (a.ch.top + 2.7 + a.body.position.y) + (o.k === 'anger' ? 0.5 : 0.3) * EM, a.pos.z - Math.sin(a.yaw) * side);
       sp.scale.setScalar(o.size * pul * Math.max(0.01, easeOutBack(Math.min(1, u * 7))));
       m.opacity = 1 - clamp((u - 0.7) / 0.3, 0, 1);
     }
@@ -428,6 +795,7 @@ function reactCrab(a, v, dt, now) {
   const r = a.re, R = RX, fl = v === 'failed' ? 0.3 : 1; // a failed crab flinches but stays flopped
   R.by = 0; R.rx = 0; R.rz = 0; R.sy = 1; R.dA = 0; R.armY = 0; R.squint = false; R.happy = false;
   R.ry = 0; R.ex = 0; R.esy = 1; R.lg[0] = R.lg[1] = R.lg[2] = R.lg[3] = 0;
+  R.dL = 0; R.dR = 0; R.dizzy = false; R.orbit = 0; R.headX = 0; R.headY = 0; R.headZ = 0; R.earX = 0; R.earZ = 0; R.tailW = 0; R.mouth = 0;
   const petting = now < r.petUntil;
   if (r.session && !petting) { // stroking stopped: one happy hop
     r.session = false;
@@ -509,6 +877,7 @@ function layout() {
   let i = 0; const out = [];
   for (const a of agents.values()) if (!seen.has(a.id)) out.push(a);
   out.forEach((a) => { const an = (i++ / out.length) * 6.283; a.tgt.set(Math.sin(an) * RAD * 3, 0, Math.cos(an) * RAD * 3); a.depth = 3; a.ang = an; });
+  if (demoLineup) lineupLayout();
 
   // files: sorted by first-seen so slots stay stable
   if (wire2) layoutFiles2(root);
@@ -872,6 +1241,7 @@ function syncScene(s) {
     } else {
       a.d = d;
       const arch = !!d.isArchitect; if (a.hat.visible !== arch) a.hat.visible = arch;
+      const wc = charIdFor(d); if (wc !== a.wantId) { a.wantId = wc; mountWanted(a); }
     }
     refreshCrabLabel(a);
   }
@@ -922,6 +1292,7 @@ function applySnapshot(s, fromDemo) {
   if (sessionId != null && sid != null && sid !== sessionId && renderer) resetScene();
   if (sid != null) sessionId = sid;
   lastSnap = s; recvAt = performance.now();
+  if (!params.get('chars') && !fromDemo) takeRules(s.chars);
   if (renderer) {
     try { syncScene(s); processEvents(Array.isArray(s.events) ? s.events : [], s.now || Date.now()); }
     catch (err) { if (window.console) console.error('crew-graph scene', err); }
@@ -929,10 +1300,18 @@ function applySnapshot(s, fromDemo) {
   if (overlay) { noteData(s); return; }
   renderHud(s);
 }
+// The assignment ("main=crab, Explore=bunny, *=random") arrives parsed in the snapshot as [[who, character], ...]
+function takeRules(list) {
+  const r = Array.isArray(list) ? list.filter((x) => Array.isArray(x) && typeof x[0] === 'string' && typeof x[1] === 'string').slice(0, 64) : [];
+  const sig = JSON.stringify(r);
+  if (sig === charSig) return;
+  charSig = sig; charRules = r;
+  if (renderer) reskinAll();
+}
 window.__crewUpdate = (snap) => applySnapshot(snap, false);
 
 /* ---------------------------------------------------------------- camera */
-const cam = { theta: overlay ? 0.3 : 0.55, phi: overlay ? 1.2 : 1.0, dist: 24, tx: 0, ty: 1.5, tz: 0, gx: 0, gz: 0, gd: 24 };
+const cam = { theta: overlay ? 0.3 : params.get('demo') === 'lineup' ? 0.0 : 0.55, phi: overlay ? 1.2 : params.get('demo') === 'lineup' ? 0.9 : 1.0, dist: 24, tx: 0, ty: 1.5, tz: 0, gx: 0, gz: 0, gd: 24 };
 let fitPending = true, autoFit = true, lastInteract = -99;
 function fitBounds() {
   let x0 = 1e9, x1 = -1e9, z0 = 1e9, z1 = -1e9, n = 0;
@@ -942,6 +1321,7 @@ function fitBounds() {
   cam.gx = (x0 + x1) / 2; cam.gz = (z0 + z1) / 2;
   const r = Math.max(x1 - x0, z1 - z0) / 2 + 5;
   const asp = camera.aspect || 1;
+  if (demoLineup) { cam.gd = Math.max(((x1 - x0) / 2 + 4.5) / (Math.tan(25 * Math.PI / 180) * asp), ((z1 - z0) / 2 + 4) / Math.tan(25 * Math.PI / 180) * 1.3) * 0.82; return; }
   // Embedded, the crabs must fill the few pixels the pane has: frame tighter.
   cam.gd = clamp(r / Math.tan(25 * Math.PI / 180) * (embed ? 0.62 : overlay ? 0.8 : 0.85) / Math.min(1, asp), embed || overlay ? 9 : 14, 140);
 }
@@ -951,14 +1331,14 @@ function updateCamera(dt, now) {
     const k = 1 - Math.exp(-dt * 2.5);
     cam.tx += (cam.gx - cam.tx) * k; cam.tz += (cam.gz - cam.tz) * k; cam.dist += (cam.gd - cam.dist) * k;
   }
-  if (!overlay && now - lastInteract > 4) cam.theta += dt * 0.07; // the pet sits still: a turning camera is distracting on a desktop
+  if (!overlay && !demoLineup && now - lastInteract > 4) cam.theta += dt * 0.07; // the pet sits still: a turning camera is distracting on a desktop
   const sp = Math.sin(cam.phi), cp = Math.cos(cam.phi);
   camera.position.set(cam.tx + cam.dist * sp * Math.sin(cam.theta), cam.ty + cam.dist * cp, cam.tz + cam.dist * sp * Math.cos(cam.theta));
   camera.lookAt(cam.tx, cam.ty, cam.tz);
 }
 
 /* ---------------------------------------------------------------- input */
-const ptr = { down: false, btn: 0, x: 0, y: 0, sx: 0, sy: 0, moved: 0, mx: -1, my: -1, pet: null, st: null, pick: null, ssx: 0, ssy: 0, fromPlate: false, crabPress: null, rev: 0, dirx: 0, lastSX: 0, path: 0, pressT: 0, petting: false };
+const ptr = { down: false, btn: 0, x: 0, y: 0, sx: 0, sy: 0, moved: 0, mx: -1, my: -1, pet: null, st: null, pick: null, ssx: 0, ssy: 0, fromPlate: false };
 function pick(px, py) {
   const W = innerWidth, H = innerHeight; let best = null, bd = 1e9;
   const test = (o, r, bias) => {
@@ -972,7 +1352,7 @@ function pick(px, py) {
   agents.forEach((a) => test(a, crabRadius(a), 12));
   return best;
 }
-const crabRadius = (a) => clamp(a.s * 160 / Math.max(0.3, (cam.dist / 24)), 24, 70);
+const crabRadius = (a) => clamp(a.s * 160 * a.ch.hitR / Math.max(0.3, (cam.dist / 24)), 24, 70);
 const crabAt = (px, py) => { const o = pick(px, py); return o && o.root ? o : null; };
 function updateCursor() {
   if (!renderer) return;
@@ -1028,8 +1408,6 @@ if (renderer) {
     ptr.pet = !overlay && e.button === 0 && !e.shiftKey ? crabAt(e.clientX, e.clientY) : null; ptr.st = null;
     ptr.fromPlate = e.currentTarget !== el; // the nameplate: pressing it carries the window, nothing else
     ptr.pick = overlay && !ptr.fromPlate ? pick(e.clientX, e.clientY) : null;
-    // Pressing a crab: back-and-forth strokes pet it, a longer pull or a held press carries the window.
-    ptr.crabPress = ptr.pick && ptr.pick.root ? ptr.pick : null; ptr.rev = 0; ptr.dirx = 0; ptr.lastSX = e.screenX; ptr.path = 0; ptr.pressT = nowS(); ptr.petting = false;
     hideMore();
     try { e.currentTarget.setPointerCapture(e.pointerId); } catch (x) { /* ignore */ }
     if (overlay) { ptr.mx = e.clientX; ptr.my = e.clientY; kick(); }
@@ -1045,14 +1423,7 @@ if (renderer) {
       if (ptr.btn === 2) { cam.theta -= dx * 0.006; cam.phi = clamp(cam.phi - dy * 0.005, 0.12, 1.5); return; }
       if (ptr.btn === 0 && pet) {
         const sdx = e.screenX - ptr.ssx, sdy = e.screenY - ptr.ssy, dist = Math.hypot(sdx, sdy);
-        if (ptr.crabPress && !ptr.fromPlate) {
-          ptr.path += Math.abs(dx) + Math.abs(dy);
-          const stepX = e.screenX - ptr.lastSX;
-          if (Math.abs(stepX) >= 3) { const d = stepX > 0 ? 1 : -1; if (ptr.dirx && d !== ptr.dirx) ptr.rev++; ptr.dirx = d; ptr.lastSX = e.screenX; }
-          if (ptr.rev >= 2) ptr.petting = true; // two turns of direction: that is a stroke
-          if (ptr.petting) { if (agents.get(ptr.crabPress.id) === ptr.crabPress) keepPet(ptr.crabPress, 0.45); return; }
-          if (ptr.path >= 40 || (nowS() - ptr.pressT > 0.45 && dist > 4)) beginCarry(sdx, sdy);
-        } else if (dist > 4) beginCarry(sdx, sdy);
+        if (dist > 4) beginCarry(sdx, sdy); // pressing a crab and pulling carries the window, always; petting is a stroke with the button up
       }
       return;
     }
@@ -1144,7 +1515,7 @@ function schedule(ms) {
 }
 function kick() { if (overlay && frameTimer) schedule(0); }
 function isBusy(n) {
-  if (n < busyUntil || ptr.down || carry || sizing || overContent || particles.length || rfx.length || effects.length) return true;
+  if (n < busyUntil || ptr.down || carry || sizing || overContent || particles.length || rfx.length || effects.length || shake.W > 0.03) return true;
   return !dozing && sessionRunning(); // working crabs animate smoothly
 }
 function sessionRunning() {
@@ -1192,9 +1563,61 @@ function overlayStep(dt, now) {
   if (wasDozing && !dozing) wakeAll();
   wasDozing = dozing;
   if (carry) { const k = 1 - Math.exp(-dt * 10); carry.sx += (carry.vx - carry.sx) * k; carry.sy += (carry.vy - carry.sy) * k; }
+  shakeStep(dt, now);
   // The grip is up whenever the pointer is in the window (it moved lately), so it can always be reached.
   document.body.classList.toggle('hot', now < hotUntil || sizing || (ptr.mx >= 0 && now - lastMoveAt < 4));
 }
+
+/* ---- shaking the window: the carry velocity (px/s) the main process sends, its direction reversals, and springs that make limbs follow through */
+// A shake = 3 or more reversals of the carry velocity within 1.2 s, each from a speed over SHAKE_MIN_V. Its energy E (0..1) grows with the
+// count and the speed, so a hard shake looks different from a sway. E feeds the carried character's flail and the dizziness `dz`; the window
+// itself is a spring box that the other characters, and the files, are knocked about by.
+const SHAKE_MIN_V = 330, SHAKE_DEAD = 90;
+const shake = { revs: [], sgn: [0, 0], pk: [0, 0], lastRev: [0, 0], E: 0, dz: 0, vx: 0, vy: 0, W: 0, box: { x: 0, xv: 0, y: 0, yv: 0 } };
+function noteCarryVelocity(vx, vy) {
+  const now = nowS(); shake.vx = vx; shake.vy = vy;
+  [vx, vy].forEach((vel, i) => {
+    const s = Math.abs(vel) < SHAKE_DEAD ? 0 : vel > 0 ? 1 : -1;
+    if (!s) return;
+    shake.pk[i] = Math.max(shake.pk[i], Math.abs(vel));
+    if (shake.sgn[i] && s !== shake.sgn[i]) {
+      if (shake.pk[i] >= SHAKE_MIN_V && now - shake.lastRev[i] > 0.05) { shake.revs.push({ t: now, pk: shake.pk[i] }); shake.lastRev[i] = now; busyUntil = Math.max(busyUntil, now + 1.5); }
+      shake.pk[i] = 0;
+    }
+    shake.sgn[i] = s;
+  });
+}
+function sstep(s, tgt, w, z, dt) { // a damped spring, two sub-steps
+  const h = Math.min(dt, 0.05) / 2;
+  for (let i = 0; i < 2; i++) { s.v += (w * w * (tgt - s.x) - 2 * z * w * s.v) * h; s.x += s.v * h; }
+  return s.x;
+}
+const newSpring = () => ({ x: 0, v: 0 });
+function newSprings() { return { ax: newSpring(), ay: newSpring(), bx: newSpring(), by: newSpring(), ly: newSpring(), ex: newSpring(), ey: newSpring(), tx: newSpring(), hx: newSpring(), hy: newSpring() }; }
+function shakeStep(dt, now) {
+  const S = shake, bx = S.box;
+  while (S.revs.length && now - S.revs[0].t > 1.2) S.revs.shift();
+  const n = S.revs.length;
+  let tgt = 0;
+  if (n >= 3) tgt = clamp((n - 2) / 5, 0, 1) * clamp(S.revs.reduce((s, r) => s + r.pk, 0) / n / 1400, 0.35, 1);
+  S.E += (tgt - S.E) * (1 - Math.exp(-dt * (tgt > S.E ? 12 : 2.5)));
+  if (carry) { S.dz += S.E * dt * 1.0; S.dz *= Math.exp(-dt * 0.12); } else { S.vx *= Math.exp(-dt * 8); S.vy *= Math.exp(-dt * 8); }
+  const tx = clamp(-S.vx / 900, -1.4, 1.4), ty = clamp(S.vy / 900, -1.4, 1.4), h = Math.min(dt, 0.05) / 2;
+  for (let i = 0; i < 2; i++) {
+    bx.xv += (225 * (tx - bx.x) - 2 * 0.22 * 15 * bx.xv) * h; bx.x += bx.xv * h;
+    bx.yv += (225 * (ty - bx.y) - 2 * 0.22 * 15 * bx.yv) * h; bx.y += bx.yv * h;
+  }
+  S.W = Math.max(S.E, clamp(Math.hypot(bx.xv, bx.yv) / 22, 0, 0.7));
+}
+// A shaken crab that is put down: a hard shake sits it down first, then it staggers (stars circle its head) and shakes it off.
+function startDizzy(a, dz) {
+  const r = a.re, now = nowS(), hard = dz > 1.2; // only a very hard shake sits it down first
+  r.sitDur = hard ? 0.9 : 0; r.sitT = now;
+  r.dizzyT = now + r.sitDur; r.dizzyDur = 1.4 + 0.8 * clamp(dz / 1.2, 0, 1);
+  for (let i = 0; i < 3; i++) spawnRfx('star', a, i * 0.06);
+  busyUntil = Math.max(busyUntil, now + r.sitDur + r.dizzyDur + 1);
+}
+function petMove(v) { if (carry && v) { carry.vx = +v.vx || 0; carry.vy = +v.vy || 0; noteCarryVelocity(carry.vx, carry.vy); } }
 
 /* ---- pet behaviour on top of the verb pose: sleeping, blinking, shuffling, looking, hops, stretch, carry */
 function petCrab(a, v, dt, now, R) {
@@ -1250,13 +1673,57 @@ function petCrab(a, v, dt, now, R) {
   }
   const uw = now - r.wobT;
   if (uw >= 0 && uw < 1.3) R.rz += 0.16 * Math.sin(uw * 22) * Math.exp(-uw * 3.2);
+  // limbs that follow through: springs chasing the window's velocity, one set per limb group so they lag by different amounts
+  const SP = a.sp, vxn = clamp(-shake.vx / 900, -1.4, 1.4), vyn = clamp(shake.vy / 900, -1.4, 1.4);
+  sstep(SP.ax, vxn, 17, 0.18, dt); sstep(SP.ay, vyn, 17, 0.18, dt); sstep(SP.bx, vxn, 13, 0.22, dt); sstep(SP.by, vyn, 13, 0.22, dt);
+  sstep(SP.ly, vyn, 11, 0.2, dt); sstep(SP.ex, vxn, 10, 0.14, dt); sstep(SP.ey, vyn, 10, 0.14, dt); sstep(SP.tx, vxn, 8, 0.15, dt);
+  sstep(SP.hx, vxn, 14, 0.2, dt); sstep(SP.hy, vyn, 14, 0.2, dt);
+  const E = shake.E, W = shake.W;
   if (carry) {
     if (carried) { // dangles by the claws: legs swing, the body sways against the window's velocity
       const amp = 0.4 + clamp(Math.hypot(carry.sx, carry.sy) / 900, 0, 0.7);
       R.by += 1.9; R.dA += 0.9;
       R.rz += clamp(-carry.sx / 1100, -0.7, 0.7); R.rx += clamp(carry.sy / 1600, -0.4, 0.4);
       for (let i = 0; i < 4; i++) R.lg[i] += amp * (0.5 + 0.5 * Math.sin(now * 9 + i * 1.5 + carry.sx * 0.002));
+      if (E > 0.02) { // shaken: arms, legs, ears and tail flail with lag, the eyes spin, sweat and stars fly
+        R.dL += E * (SP.ax.x * 1.5 + SP.ay.x * 1.7); R.dR += E * (-SP.ax.x * 1.5 + SP.ay.x * 1.7);
+        R.rz += E * SP.bx.x * 0.8; R.rx -= E * SP.by.x * 0.5; R.ry += E * 0.45 * Math.sin(now * 19 + a.ph);
+        for (let i = 0; i < 4; i++) R.lg[i] += E * 1.1 * Math.max(0, Math.sin(now * 17 + i * 1.9 + SP.ly.x * 3));
+        R.earZ += E * SP.ex.x * 1.4; R.earX += E * (SP.ey.x * 1.2 + 0.4); R.tailW += E * SP.tx.x * 1.6;
+        R.headZ += E * SP.hx.x * 0.9; R.headX += E * SP.hy.x * 0.7; R.headY += E * 0.6 * Math.sin(now * 27);
+        R.mouth = Math.max(R.mouth, 0.5 + 0.5 * E); R.sy *= 1 + 0.05 * E * Math.sin(now * 31);
+        if (E > 0.2 || shake.dz > 0.4) R.dizzy = true;
+        if (now >= r.starAt) { r.starAt = now + 0.2 / (0.4 + E * 1.2); spawnRfx(Math.random() < 0.5 ? 'sweat' : 'star', a, 0); }
+      }
     } else R.rz += clamp(-carry.sx / 3000, -0.14, 0.14);
+  }
+  if (!carried && W > 0.03) { // everyone else in the box is knocked about with it and settles when it stops
+    const wk = Math.min(1, W * 1.5);
+    R.by += 1.2 * E * Math.abs(Math.sin(now * 12 + a.ph * 3)); R.rz += wk * SP.bx.x * 0.4 + 0.12 * E * Math.sin(now * 21 + a.ph * 2); R.rx += 0.1 * E * Math.sin(now * 17 + a.ph);
+    R.dL += wk * (SP.ax.x * 0.7 + SP.ay.x * 0.8); R.dR += wk * (-SP.ax.x * 0.7 + SP.ay.x * 0.8);
+    R.earZ += wk * SP.ex.x * 0.8; R.earX += wk * SP.ey.x * 0.6; R.tailW += wk * SP.tx.x; R.headZ += wk * SP.hx.x * 0.5;
+    for (let i = 0; i < 4; i++) R.lg[i] += 0.5 * E * Math.max(0, Math.sin(now * 15 + i * 1.7 + a.ph));
+  }
+  const usit = now - r.sitT; // after a hard shake: down on its bottom for a moment
+  if (r.sitDur > 0 && usit >= 0 && usit < r.sitDur) {
+    const k = Math.min(1, usit / 0.18) * (1 - clamp((usit - (r.sitDur - 0.25)) / 0.25, 0, 1));
+    R.sy *= 1 - 0.22 * k; R.by -= 0.35 * k; R.rx -= 0.12 * k; R.dA -= 0.5 * k; R.dizzy = true; R.orbit = Math.max(R.orbit, k); R.mouth = Math.max(R.mouth, 0.4);
+    for (let i = 0; i < 4; i++) R.lg[i] += 0.5 * k;
+    R.rz += 0.06 * k * Math.sin(usit * 9);
+  }
+  const uz = now - r.dizzyT; // the stagger: wobbly sway, circling stars, then shaking it off
+  if (uz >= 0 && uz < r.dizzyDur) {
+    const k = 1 - uz / r.dizzyDur, off = r.dizzyDur - 0.5;
+    if (uz < off) {
+      R.dizzy = true; R.orbit = Math.max(R.orbit, 1 - clamp((uz - (off - 0.3)) / 0.3, 0, 1)); R.mouth = Math.max(R.mouth, 0.35);
+      R.rz += 0.3 * k * Math.sin(uz * 5.2); R.ry += 0.5 * k * Math.sin(uz * 3.0 + 1); R.rx += 0.1 * k * Math.sin(uz * 4.1);
+      R.by += 0.15 * k * (0.5 + 0.5 * Math.sin(uz * 9)); R.headZ += 0.3 * k * Math.sin(uz * 5.2 + 1);
+      R.dL += 0.3 * k * Math.sin(uz * 6); R.dR -= 0.3 * k * Math.sin(uz * 6);
+      for (let i = 0; i < 4; i++) R.lg[i] += 0.3 * k * Math.max(0, Math.sin(uz * 8 + i * 1.7));
+    } else { // a little head shake
+      const w = (uz - off) / 0.5, sw = Math.sin(w * Math.PI * 5) * (1 - w);
+      R.ry += 0.8 * sw; R.headY += 0.8 * sw; R.earZ += 0.6 * sw; R.squint = true; R.sy *= 1 + 0.05 * Math.sin(w * Math.PI);
+    }
   }
 }
 
@@ -1299,7 +1766,7 @@ function updateBubble(a, v, dt) {
   B.mat.opacity = B.o * (1 - 0.6 * a.dim);
   const upp = unitsPerPx(a.root.position), H = 20;
   B.sp.scale.set(H * upp * B.cv.width / B.cv.height, H * upp, 1);
-  B.sp.position.set(a.pos.x, (a.s * 8.4 + a.body.position.y * a.s + 0.2), a.pos.z);
+  B.sp.position.set(a.pos.x, (a.s * (a.ch.top + 3.7) + a.body.position.y * a.s + 0.2), a.pos.z);
 }
 
 /* ---- hover card: the snapshot says who touched a file; the main process adds a summary of the file itself */
@@ -1441,16 +1908,20 @@ function beginCarry(dx, dy) {
 }
 function endCarry() {
   const c = carry; if (!c) return;
-  pet.dragEnd(); carry = null;
+  if (pet) pet.dragEnd();
+  carry = null;
   const n = nowS(); let i = 0;
-  if (c.crab && agents.get(c.crab.id) === c.crab) { c.crab.re.dropT = n; spawnRfx('bang', c.crab, 0.05); }
+  const dz = shake.dz; shake.dz = 0; shake.revs.length = 0;
+  if (c.crab && agents.get(c.crab.id) === c.crab) {
+    if (dz > 0.3) startDizzy(c.crab, dz); // shaken: sits down if it was hard, then staggers
+    else { c.crab.re.dropT = n; spawnRfx('bang', c.crab, 0.05); }
+  }
   agents.forEach((a) => { if (a !== c.crab) a.re.wobT = n + 0.08 * ++i; });
   needProbe = true; busyUntil = Math.max(busyUntil, n + 2); kick();
 }
 function overlayUp(e) {
   if (carry) { endCarry(); ptr.pick = null; return; }
   if (ptr.fromPlate) { if (e.button === 2 && ptr.moved < 5 && pet) pet.menu({ kind: 'plate' }); return; }
-  if (ptr.petting) { if (ptr.crabPress) ptr.crabPress.re.petUntil = Math.min(ptr.crabPress.re.petUntil, nowS()); ptr.petting = false; ptr.crabPress = null; return; }
   const o = pick(e.clientX, e.clientY);
   if (o && o.chipOf) { if (e.button === 0 && ptr.moved < 8) showMore(o.chipOf); else if (e.button === 2 && ptr.moved < 5 && pet) pet.menu({}); return; }
   if (e.button === 2) { // right click without a drag: the menu (a file gets its own entries)
@@ -1518,7 +1989,7 @@ if (overlay) {
   window.addEventListener('blur', () => { if (carry) endCarry(); });
   window.addEventListener('pointerup', () => { if (carry) endCarry(); });
   if (pet) {
-    pet.onMove((v) => { if (carry && v) { carry.vx = +v.vx || 0; carry.vy = +v.vy || 0; } });
+    pet.onMove(petMove);
     pet.onEvent((ev) => {
       if (!ev) return;
       if (ev.type === 'hop') hopAll();
@@ -1554,6 +2025,7 @@ function step(dt) {
       f.pos.lerp(f.tgt, 1 - Math.exp(-dt * 3));
       f.g.position.set(f.pos.x, f.pos.y + 0.18 * Math.sin(clockT * 1.5 + f.ph), f.pos.z);
       f.mesh.rotation.y = clockT * 0.6 + f.ph;
+      if (overlay && shake.W > 0.03) { const w = shake.W; f.g.position.x += 0.12 * w * Math.sin(clockT * 41 + f.ph * 3); f.g.position.y += 0.1 * w * Math.abs(Math.sin(clockT * 33 + f.ph)); f.mesh.rotation.z = 0.25 * w * Math.sin(clockT * 37 + f.ph); } else if (f.mesh.rotation.z) f.mesh.rotation.z = 0;
       f.g.scale.setScalar(Math.max(0.001, easeOutBack((now - f.born) / 0.5)));
     });
     if (wire2) { updateLinks(dt); updateEdges2(now); } else updateEdges();
@@ -1706,6 +2178,24 @@ function poll() {
   if (old && old.parentNode) old.parentNode.removeChild(old);
 }
 
+/* ---- user characters: characters-user.js is rewritten by the mod (startWeb, /crew characters reload); look again now and then */
+let userRev = String(window.__crewUserRev || '');
+function pollChars() {
+  const sc = document.createElement('script');
+  const done = () => {
+    if (sc.parentNode) sc.parentNode.removeChild(sc);
+    const rev = String(window.__crewUserRev || '');
+    if (rev === userRev) return;
+    userRev = rev;
+    loadCharacters();
+    agents.forEach((a) => { a.chId = ''; }); // content may have changed under the same id
+    reskinAll();
+  };
+  sc.onload = done; sc.onerror = done;
+  sc.src = 'characters-user.js?t=' + Date.now();
+  document.head.appendChild(sc);
+}
+
 /* ---------------------------------------------------------------- demo generator */
 // ?demoRoot=<repo dir>: three demo files point at real files, so the pet's hover summary and click can be tried
 const demoRoot = (params.get('demoRoot') || '').replace(/\\/g, '/').replace(/\/$/, '');
@@ -1790,6 +2280,27 @@ const SCRIPT = [
 ];
 // ?demo=busy: six agents in a tree and eighteen files, with reads and writes going on all the time
 const demoBusy = params.get('demo') === 'busy';
+// ?demo=lineup: every character in a row, each doing the verbs of ?verbs= (default think,edit,run); ?chars= still decides who is who for the types it names
+const demoLineup = params.get('demo') === 'lineup';
+const LINE_VERBS = (params.get('verbs') || 'think,edit,run').split(',').map((s) => s.trim()).filter(Boolean).slice(0, 6);
+const lineupSlots = new Map();
+function demoLineupInit() {
+  demo.ag = [];
+  const ids = charIds.length ? charIds : ['crab'];
+  ids.forEach((cid, ci) => LINE_VERBS.forEach((vb, vi) => {
+    const id = 'lu-' + cid + '-' + vb;
+    dAgent(id, null, cid, vb, vb, vb === 'edit' ? 'app.js' : vb === 'run' ? 'npm test' : '', { status: vb === 'failed' ? 'failed' : vb === 'done' ? 'completed' : vb === 'wait' ? 'idle' : 'running' });
+    lineupSlots.set(id, [ci, vi, ids.length]);
+  }));
+}
+function lineupLayout() {
+  const rows = LINE_VERBS.length;
+  agents.forEach((a) => {
+    const s = lineupSlots.get(a.id); if (!s) return;
+    a.tgt.set((s[0] - (s[2] - 1) / 2) * 8.6, 0, (s[1] - (rows - 1) / 2) * 7.6);
+    a.depth = 1; a.ang = 0;
+  });
+}
 const BUSY_AGENTS = [['a1', 'main', 'Explore', 'map the loader', 'search'], ['a2', 'main', 'sonnet-coder', 'rewrite loader', 'edit'], ['a3', 'main', 'doc-writer', 'update the docs', 'read'],
   ['a4', 'a2', 'sonnet-coder', 'fix the tests', 'run'], ['a5', 'a2', 'Explore', 'check callers', 'read'], ['a6', 'a3', 'architect', 'review the design', 'think']];
 const BUSY_FILES = [['plans/loader.md', 'plan'], ['plans/docs.md', 'plan'], ['docs/README.md', 'doc'], ['docs/MIGRATION.md', 'doc'], ['docs/API.md', 'doc'], ['CHANGELOG.md', 'doc'],
@@ -1812,7 +2323,8 @@ function demoBusyEvent() {
 }
 function demoTick() {
   const t = nowS() - demo.t0;
-  if (demoBusy) { if (!demo.busyInit) { demo.busyInit = true; demoBusyInit(); } if (Math.random() < 0.7) demoBusyEvent(); }
+  if (demoLineup) { if (!demo.lineInit) { demo.lineInit = true; demoLineupInit(); } }
+  else if (demoBusy) { if (!demo.busyInit) { demo.busyInit = true; demoBusyInit(); } if (Math.random() < 0.7) demoBusyEvent(); }
   else while (demo.step < SCRIPT.length && SCRIPT[demo.step][0] <= t) { const i = demo.step++; SCRIPT[i][1](); }
   const now = Date.now(), se = demo.se;
   demo.ag.forEach((a) => { if (a.status === 'running') { a.steps += Math.random() < 0.35 ? 1 : 0; a.calls += Math.random() < 0.4 ? 1 : 0; a.ctxTokens += Math.round(Math.random() * 600); a.outTokens += Math.round(Math.random() * 90); } });
@@ -1842,19 +2354,36 @@ window.__crewGrab = (w, h) => {
   return btoa(bin);
 };
 
+/* ---------------------------------------------------------------- test hooks (?hooks): for the scripts that drive the page */
+if (params.has('hooks')) {
+  window.__crewTest = {
+    agents, files, CHARS, camera, cam, shake, THREE: T, rfx, makeCrab, updateCrab, scene,
+    anchorOf, noteCarryVelocity, petMove, pinchCrab, keepPet, setRules: (spec) => { charRules = CC.parseRules(spec); reskinAll(); },
+    ids: () => charIds.slice(),
+    // carry without the main process: the same state beginCarry makes, minus the window move
+    carryStart: (id) => { carry = { crab: agents.get(id) || null, vx: 0, vy: 0, sx: 0, sy: 0 }; busyUntil = nowS() + 30; },
+    carryEnd: () => endCarry(),
+    isCarrying: () => !!carry, setAutoFit: (b) => { autoFit = !!b; },
+    screenOf: (id) => { const a = agents.get(id), v = new T.Vector3(); anchorOf(a, v); v.project(camera); return { x: (v.x * 0.5 + 0.5) * innerWidth, y: (-v.y * 0.5 + 0.5) * innerHeight }; },
+    info: (id) => { const a = agents.get(id); return a ? { char: a.chId, want: a.wantId, s: a.s, top: a.ch.top, hitR: a.ch.hitR, bones: Object.keys(a.bn), glb: a.ch.glb, via: (CHARS.get(a.chId) || {}).via } : null; },
+  };
+}
+
 /* ---------------------------------------------------------------- boot */
 if (overlay) {
   document.documentElement.classList.add('overlay'); document.body.classList.add('overlay');
   if (params.get('ticker') === '0') document.body.classList.add('noticker');
 }
+loadCharacters();
 resize();
 if (!embed) requestAnimationFrame(frame); // embedded: rendering is driven by __crewGrab, never by a continuous loop
 if (!overlay) setInterval(tickHud, 250);
 setChip();
-if (embed) document.body.classList.add('embed');
+if (embed || params.has('nohud')) document.body.classList.add('embed'); // ?nohud: no side cards (shots of the characters)
 if (forceDemo) startDemo();
 else {
   poll(); setInterval(poll, overlay ? 1000 : 500);
+  setInterval(pollChars, 6000);
   if (!embed && !overlay) setTimeout(() => { if (!gotReal) startDemo(); }, 3000); // the pet has no demo fallback: no data, no show
 }
 })();
