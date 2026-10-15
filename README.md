@@ -95,6 +95,7 @@ main=crab, Explore=cat, *=auto
 | `/crew web [noopen\|off]` | The browser view |
 | `/crew 3d [off]` | 3D inside the pane |
 | `/crew characters [reload]` | List characters and who gets which |
+| `/crew setup` | Show which task tools this session has and what feeds the characters (changes nothing) |
 | `/crew layout auto\|compact\|wide\|mini` | Pane layout |
 
 Options (in `/config`): `petOnStart`, `webOnStart`, `characters`, `layout`, `panels` and the rest of [Flightdeck's](docs/guide.md#configure).

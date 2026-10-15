@@ -2,7 +2,7 @@
 
 The full reference. For the short version, see the [README](../README.md) ([한국어](../README.ko.md)).
 
-- [Panels](#panels) · [3D view in the pane](#3d-view-in-the-pane) · [3D web view](#3d-web-view) · [Desktop pet](#desktop-pet) · [Settings in the pet](#settings-in-the-pet) · [Tasks](#tasks)
+- [Panels](#panels) · [3D view in the pane](#3d-view-in-the-pane) · [3D web view](#3d-web-view) · [Desktop pet](#desktop-pet) · [Settings in the pet](#settings-in-the-pet) · [Tasks](#tasks) · [No task tools?](#food-when-the-model-has-no-task-tools)
 - [Characters](#characters) · [Commands](#commands) · [Configure](#configure) · [What it can reach](#what-it-can-reach) · [Develop](#develop)
 
 ## Panels
@@ -264,6 +264,21 @@ main=crab, Explore=bunny, sonnet-coder=robot, architect=mochi, *=auto
   - **How the bytes get to the page.** Files up to 4 MiB (the most the mod's `fs.read` can hand over) are embedded as base64 script parts in `characters-glb/`, which works everywhere, in a browser on `file://` and in the pet. A larger file is read from the folder by the page itself: the pet (Electron) can do that, a browser on `file://` usually refuses unless it runs with file access, and then the character falls back to a crab and the console says why.
   - `node tools/make-test-glb.mjs out.glb` (run it from a checkout of this repository; the installed plugin does not carry `tools/`) writes a small test model (a made-up "puff") with a rig-named skeleton, for trying the path.
 
+### Food when the model has no task tools
+
+Claude Code leaves `TodoWrite`, `TaskCreate`, `TaskGet`, `TaskUpdate` and `TaskList` out on newer models unless you ask for them ([tools reference](https://code.claude.com/docs/en/tools-reference#task-tool-availability), [environment variables](https://code.claude.com/docs/en/env-vars)), and the subagents of such a session get none either. Without them there are no to-do lists, so the mod makes food from proxies of real work instead. It reads the session's tool list at start (`TodoWrite` or `TaskCreate` present means native tools); nothing is registered, written or changed for this.
+
+| Source | Is food when | The item |
+| --- | --- | --- |
+| To-dos and tasks | An agent writes them (native tools) | As above |
+| Subagent tickets | Always | As above |
+| **Prompt turns** | The session has no native task tools (`foodFrom` `auto`), or `foodFrom` is `todos+work` | Each prompt you send is one item owned by main, titled by the prompt (one line, credentials masked, about 60 cells). Pending while it waits behind a running turn, in progress while its turn runs, eaten (main's `✓ N`) when the turn answers, failed when it is aborted or ends in an error. A question typed into the pet is titled by your words, not by the frame. Turns the engine opens by itself (a hand-back, a task notification) and subagents' turns are not items. |
+| Background jobs | Not tracked | A background `Bash` job or `Monitor` is not an item. When one ends, the mod sees it only as a notification prompt whose text format Claude Code does not type, so it cannot tell which job ended; the one typed link back to the call that started it (`task.toolUseId`) is on a transcript row (a render site), which cannot write state and needs a surface. A hook for it may become possible if Claude Code adds an event. |
+
+The `foodFrom` option (`/config`): `auto` (default) uses the prompt turns only when the session is known to have no native task tools, `todos` never does, `todos+work` always does. An unreadable tool list counts as unknown, so `auto` leaves the turns out; a native task call seen later in the session settles it as present. The subagent tickets are food in every setting.
+
+`/crew setup` only reports: whether the native tools are present, which sources are on, and how to get the native tools (set `CLAUDE_CODE_ENABLE_TODO_TOOLS=1` in the environment before starting Claude Code, or under `env` in your `settings.json`; they cost some context on every request). It changes nothing and writes no file.
+
 Characters you load are yours: the repository ships only the five original ones above.
 
 ### Pack problems
@@ -301,6 +316,7 @@ The mod writes them next to each pack in `characters-user.js` (`window.__crewUse
 | `/crew web [noopen\|off]` | The 3D browser view. |
 | `/crew pet` | The desktop pet: the crabs in a transparent always-on-top window, one window per session. |
 | `/crew pet off [all]` | Close this session's pet window, or (`all`) quit the pet. |
+| `/crew setup` | Report whether the session has the native task tools, which food sources are on, and how to get the native tools. Changes nothing. See [Food when the model has no task tools](#food-when-the-model-has-no-task-tools). |
 | `/crew characters [reload]` | List the built-in characters, yours (with traits) and the current assignment, the pet's own character settings and what `auto` gives the current agents; `reload` rescans `~/.claude/crew-graph/characters/`. |
 
 Focus the pane with `ctrl+x tab`:
@@ -311,7 +327,8 @@ Focus the pane with `ctrl+x tab`:
 
 All of Flightdeck's options apply. Set them in `/config` or under `pluginConfigs["crew-graph"].options`:
 - `architectPattern`, `architectLabel`, `gateLabel`, `panels`, `motion`, `moments`, `matchDescriptions`, `maxCards`, `layout`, `palette`, `openOnStart`, `statusLine`
-- `webOnStart`, `petOnStart`, `characters`, `view3dFps`, `view3dRows`, `view3dColumns` and `view3dMode` (crew-graph only)
+- `webOnStart`, `petOnStart`, `characters`, `foodFrom`, `view3dFps`, `view3dRows`, `view3dColumns` and `view3dMode` (crew-graph only)
+- `foodFrom`: `auto` (default), `todos` or `todos+work`: whether each prompt you send is food too. See [Food when the model has no task tools](#food-when-the-model-has-no-task-tools).
 - `characters`: `who=character` pairs, e.g. `main=crab, Explore=bunny, *=auto` (a part without `=` means `*=`). Empty: every agent is a crab. The pet's Settings window sets characters too and wins over this. See [Characters](#characters).
 
 The default `panels` value is `3d,main,crew,architect,gate,agents,loops,receipt,log`. The 3d panel shows only while `/crew 3d` runs.
@@ -325,8 +342,8 @@ The mod mostly watches: every hook passes its event on unchanged, and a hook tha
 
 What it keeps:
 - **`overlay/pet-settings.json`:** the pet's settings (characters per type and per agent, what is shown, the tasks' food, motion, window, auto-dismiss). Written by the pet process only, with a temp file and a rename; `<session id>|<agent id>` keys are the only session ids in it.
-- **Session state:** short summaries (tool name plus path or command, with credentials masked), and the agents' to-do items and tasks (titles one line, credentials masked, about 80 cells), which end with the session.
-- **`data.js` and `sessions/<id>.js`:** the folder's basename, agent descriptions, the session's first prompt (shortened to about 32 characters, credentials masked), file paths relative to the session folder, short event texts, and the titles of the agents' tasks (one line, credentials masked, about 80 cells). Each file also lists its absolute path (`abs`) and the session folder's full path (`cwdAbs`), so the pet can open and summarize files. Both files are local, under your home.
+- **Session state:** short summaries (tool name plus path or command, with credentials masked), and the agents' to-do items and tasks (titles one line, credentials masked, about 80 cells), and, when the prompt turns are food, each prompt you send as an item (one line, credentials masked, about 60 cells), which end with the session.
+- **`data.js` and `sessions/<id>.js`:** the folder's basename, agent descriptions, the session's first prompt (shortened to about 32 characters, credentials masked), file paths relative to the session folder, short event texts, the titles of the agents' tasks (one line, credentials masked, about 80 cells) and, when the prompt turns are food (see [Food when the model has no task tools](#food-when-the-model-has-no-task-tools)), the prompts you send, clipped to about 60 cells with credentials masked. Each file also lists its absolute path (`abs`) and the session folder's full path (`cwdAbs`), so the pet can open and summarize files. Both files are local, under your home.
 
 ## Develop
 

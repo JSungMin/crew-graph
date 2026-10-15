@@ -51,6 +51,7 @@ import {
   parseConfig,
   prettyModel,
   promptLine,
+  redact,
   handbackOf,
   adviceLine,
   receiptOf,
@@ -68,7 +69,9 @@ import { BUILTIN_CHARACTERS, agentsFromDataJs, describeAgentPicks, describeChara
 import { ASK_MAX, aboutOf, autoDismissed, autoDismissOf, checkPetMsg, cleanAsk, composeAsk, composeStop, dismiss, dismissedOf, hiddenIds, isFinished, replyOf, withoutHidden } from './pet-ask'
 import type { AskAbout, PetMsg } from './pet-ask'
 import { absPath, clip, dataJs, describeCall, titleOf, pushEvent, shortPath, snapshotOf, touchFile, verbOfCard, scrollbar } from './crew'
-import { TASK_TOOLS, applyTaskCreate, applyTaskUpdate, applyTodoWrite, bumpEaten, createdId, normalizeBook, tasksOf } from './tasks'
+import { TASK_TOOLS, applyTaskCreate, applyTaskUpdate, applyTodoWrite, applyTurnEnd, applyTurnQueued, applyTurnStart, bumpEaten, createdId, normalizeBook, tasksOf } from './tasks'
+import { USER_ORIGINS, foodFromOf, hasNativeTaskTools, proxyFoodOn, setupReport } from './setup'
+import type { FoodFrom, SetupState } from './setup'
 
 const PANE = 'crew-graph'
 const TITLE = 'Crew'
@@ -107,7 +110,8 @@ const acts = atom({ plugin: 'crew-graph', key: 'acts' } as const, {})
 const files = atom({ plugin: 'crew-graph', key: 'files' } as const, [])
 const events = atom({ plugin: 'crew-graph', key: 'events' } as const, [])
 const parents = atom({ plugin: 'crew-graph', key: 'parents' } as const, {})
-const tasks = atom({ plugin: 'crew-graph', key: 'tasks' } as const, { todo: [], task: [], eaten: {} })
+const tasks = atom({ plugin: 'crew-graph', key: 'tasks' } as const, { todo: [], task: [], turn: [], eaten: {} })
+const setup = atom({ plugin: 'crew-graph', key: 'setup' } as const, { native: null })
 const autoOpened = atom({ plugin: 'crew-graph', key: 'autoOpened' } as const, false)
 const web = atom({ plugin: 'crew-graph', key: 'web' } as const, { isOn: false, dir: '', lastWriteAt: 0 })
 const view3d = atom({ plugin: 'crew-graph', key: 'view3d' } as const, { isOn: false, cols: 0, rows: 0, status: '' })
@@ -241,7 +245,8 @@ async function resetAll($: EngineInterface) {
   await update($, files, () => [])
   await update($, events, () => [])
   await update($, parents, () => ({}))
-  await update($, tasks, () => ({ todo: [], task: [], eaten: {} }))
+  await update($, tasks, () => ({ todo: [], task: [], turn: [], eaten: {} }))
+  turnQueue.length = 0
   await update($, sessionTitle, () => '')
   // The dismissed set belongs to the agents that were just cleared; a pending question to the pet is not answered any more.
   await update($, dismissed, () => ({}))
@@ -260,6 +265,84 @@ async function costNow($: EngineInterface): Promise<number | null> {
 
 async function noteMode($: EngineInterface, mode: string | undefined) {
   if (mode) await update($, main, m => (normalize(DEFAULT_MAIN, m).mode === mode ? normalize(DEFAULT_MAIN, m) : { ...normalize(DEFAULT_MAIN, m), mode }))
+}
+
+// ---------------------------------------------------------------- food from: which task tools the session has, and the prompt turns as proxy food
+// A model without TodoWrite / TaskCreate leaves the agents' to-dos out of the food; each prompt the user sends (main's turn) is food instead.
+// The subagent tickets are in every session. hooks/setup.ts has the rules, hooks/tasks.ts the items.
+
+/** The `foodFrom` option. */
+let foodFrom: FoodFrom = 'auto'
+/** Prompts typed while a turn runs, in line: the id of the pending item and the head of the text, to match the turn that starts for it. */
+const turnQueue: { qid: string; key: string }[] = []
+let queueSeq = 0
+const QUEUE_KEY_LEN = 80
+const QUEUE_MAX = 20
+
+async function getSetup($: EngineInterface): Promise<SetupState> {
+  return normalize({ native: null } as SetupState, await read($, setup))
+}
+
+/** Does the session list a native task tool? true / false, null when the list cannot be read. */
+async function detectNative($: EngineInterface): Promise<boolean | null> {
+  try {
+    return hasNativeTaskTools((await $.tool.list()).map(t => t.name))
+  } catch {
+    return null
+  }
+}
+
+/** The state, reading the tool list when that has not worked yet. */
+async function knownSetup($: EngineInterface): Promise<SetupState> {
+  const s = await getSetup($)
+  if (s.native !== null) return s
+  const native = await detectNative($)
+  if (native === null) return s
+  await update($, setup, () => ({ native }))
+  return { native }
+}
+
+/** Are the prompt turns food now? */
+async function proxyOn($: EngineInterface) {
+  // only `auto` depends on the tool list
+  if (foodFrom !== 'auto') return proxyFoodOn(foodFrom, null)
+  return proxyFoodOn(foodFrom, (await knownSetup($)).native)
+}
+
+/** A native task tool was used: the session has them, whatever the tool list said. */
+async function noteNativeSeen($: EngineInterface) {
+  if ((await getSetup($)).native !== true) await update($, setup, () => ({ native: true }))
+}
+
+/** A prompt typed over a running turn waits behind it: a pending item on main's plate, until its own turn starts. */
+async function noteTurnQueued($: EngineInterface, text: string) {
+  const now = await $.clock.now()
+  queueSeq += 1
+  const qid = `q${queueSeq}`
+  turnQueue.push({ qid, key: text.slice(0, QUEUE_KEY_LEN) })
+  if (turnQueue.length > QUEUE_MAX) turnQueue.shift()
+  await update($, tasks, b => applyTurnQueued(normalizeBook(b), qid, text, now))
+  await queueWeb($)
+}
+
+/**
+ * Main's turn starts: a prompt of the user's (or a question typed into the pet, titled by the user's words, not the frame) is an item in
+ * progress; a turn the engine opened with a tagged message (a hand-back, a task notification) is not. A queued prompt's pending item becomes it.
+ */
+async function noteTurnStart($: EngineInterface, turnId: string, text: string, askKey: string) {
+  if (!(askKey || (text.trim() && promptLine(text).who === 'you'))) return
+  const now = await $.clock.now()
+  const title = askKey || text
+  let at = turnQueue.findIndex(q => text.includes(q.key) || title.includes(q.key))
+  // The line runs in order: a user turn that matches no text is the head of it (a pet question never came from the line).
+  if (at < 0 && !askKey && turnQueue.length > 0) at = 0
+  const queued = at >= 0 ? turnQueue.splice(at, 1)[0] : undefined
+  await update($, tasks, b => applyTurnStart(normalizeBook(b), turnId, title, now, queued?.qid))
+}
+
+async function noteTurnEnd($: EngineInterface, turnId: string, reason: string) {
+  const now = await $.clock.now()
+  await update($, tasks, b => applyTurnEnd(normalizeBook(b), turnId, reason, now))
 }
 
 // ---------------------------------------------------------------- crew
@@ -364,7 +447,9 @@ async function writeWeb($: EngineInterface) {
     { cards: allCards, files: allFiles, acts: allActs, events: allEvents, parents: allParents },
     hidden,
   )
-  const tk = normalizeBook(book)
+  // The prompt turns are food only while the proxies are on (see food from); the to-dos, tasks and tickets always are.
+  const tk0 = normalizeBook(book)
+  const tk = (await proxyOn($)) ? tk0 : { ...tk0, turn: [] }
   const snap = snapshotOf({
     now,
     sessionId: String(sid),
@@ -1045,6 +1130,7 @@ async function run3d($: EngineInterface, gen: number, cols: number, rows: number
 export const register: Register = (on, options) => {
   const cfg = parseConfig(options)
   charRules = cfg.characterRules
+  foodFrom = foodFromOf(options.foodFrom)
   const C = PALETTES[cfg.palette]
   // tool.check carries no loop id; the tool.call around it does, keyed by the call's id.
   const callLoop = new Map<string, string | null>()
@@ -1053,10 +1139,13 @@ export const register: Register = (on, options) => {
     await $.command.register({
       name: 'crew',
       description: 'Crew: the live agent dashboard with Clawd crabs and other characters; open, close, reset, layout, the 3D web view, the desktop pet, or your own characters',
-      argumentHint: '[open|close|reset|layout auto|compact|wide|mini|web [off|noopen]|3d [off]|pet [off]|characters [reload]]',
+      argumentHint: '[open|close|reset|layout auto|compact|wide|mini|web [off|noopen]|3d [off]|pet [off]|characters [reload]|setup]',
     })
     await migrate($)
     cwd = String((e as { cwd?: string }).cwd ?? '')
+    // Which task tools this session has decides whether the prompt turns are food (an unreadable list stays unknown and is read again later).
+    await update($, setup, () => ({ native: null }))
+    await knownSetup($).catch(() => undefined)
     if (cfg.webOnStart) await startWeb($, false).catch(() => undefined)
     // Never awaited: a first start downloads Electron.
     // petOnStart, or the pet was on when this session last ran (a reload, a resume): start it again, which hands the window a new token.
@@ -1097,6 +1186,7 @@ export const register: Register = (on, options) => {
       const cols = Math.max(20, Math.min(240, Number(arg) || cfg.view3dColumns - 2))
       return { text: await start3d($, cols, cfg.view3dRows, cfg.view3dFps, cfg.view3dMode) }
     }
+    if (verb === 'setup') return { text: setupReport(await knownSetup($), foodFrom) }
     if (verb === 'characters') return { text: await charactersCommand($, cfg.characters, arg === 'reload') }
     if (verb === 'pet') return { text: arg === 'off' ? await petStop($, rest[0] === 'all') : await petStart($) }
     if (verb === 'web') {
@@ -1127,6 +1217,15 @@ export const register: Register = (on, options) => {
     return { text: 'Crew opened. Focus it with ctrl+x tab; 1-6 expand cards, f/s/o open the gate rows. /crew web opens the 3D view.' }
   })
 
+  // A prompt typed while a turn runs waits for its turn: it is a pending item on main's plate (when the prompt turns are food).
+  on('prompt.submit', async ($, e, next) => {
+    const r = await next(e)
+    if (r.drop === undefined && e.turnId !== undefined && !e.command && !e.isMeta && USER_ORIGINS.includes(e.origin.kind) && r.text.trim() && (await proxyOn($))) {
+      await noteTurnQueued($, r.text)
+    }
+    return r
+  }).catch(($, e, next) => next(e))
+
   on('classic.UserPromptSubmit', async ($, e, next) => {
     await noteMode($, e.permission_mode)
     return next(e)
@@ -1145,18 +1244,21 @@ export const register: Register = (on, options) => {
 
   on('turn.start', async ($, e, next) => {
     // The turn a pet question started: its text holds the user's words (the engine may frame them), so a match by containment.
+    let askKey = ''
     if (!e.agentId && e.text) {
       const at = askWaits.findIndex(w => e.text.includes(w.key))
       if (at >= 0) {
+        askKey = askWaits[at]?.key ?? ''
         askWaits.splice(at, 1)
         askTurns.add(e.turnId)
       }
     }
+    if (!e.agentId && (await proxyOn($))) await noteTurnStart($, e.turnId, e.text ?? '', askKey).catch(() => undefined)
     const [now, cost] = await Promise.all([$.clock.now(), costNow($)])
     await update($, turn, () => ({ ...DEFAULT_TURN, startedAt: now, costAtStart: cost }))
     await update($, main, m => ({ ...normalize(DEFAULT_MAIN, m), isRunning: true }))
     await act($, 'main', 'think', '', '')
-    if (e.text) await emit($, { kind: 'prompt', from: 'main', text: shorten(promptLine(e.text).text, 60) })
+    if (e.text) await emit($, { kind: 'prompt', from: 'main', text: shorten(redact(promptLine(e.text).text), 60) })
     // The first prompt of the session names it on the desktop pet's nameplate.
     if (e.text && promptLine(e.text).who === 'you' && !(await read($, sessionTitle))) await update($, sessionTitle, () => titleOf(e.text ?? ''))
     // A background architect's report reaches the main loop as the text opening this turn. The
@@ -1287,6 +1389,7 @@ export const register: Register = (on, options) => {
     const didRun = ran.deny === undefined
     if (didRun && ran.isError !== true && TASK_TOOLS.has(String(e.tool))) {
       await noteTasks($, e as unknown as Record<string, unknown>, ran as unknown as { result?: unknown; text?: unknown }, key).catch(() => undefined)
+      await noteNativeSeen($).catch(() => undefined)
     }
     // Settle this call's pending ask, if it had one; skip the write (and the redraw) otherwise.
     const g0 = await getGate($)
@@ -1410,6 +1513,7 @@ export const register: Register = (on, options) => {
       if (askTurns.delete(e.turnId)) await update($, lastReply, () => replyOf(e.answer, e.reason, now))
       await update($, main, m => ({ ...normalize(DEFAULT_MAIN, m), isRunning: false }))
       await act($, 'main', e.reason === 'answer' ? 'done' : 'failed', '', '')
+      await noteTurnEnd($, e.turnId, e.reason).catch(() => undefined)
       await refreshStatus($, cfg)
       await queueWeb($)
       return done

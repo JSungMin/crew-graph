@@ -141,13 +141,13 @@ export type CrewEvent = {
   text: string
 }
 
-/** A task as the pet and the browser view show it: a to-do item, a task, or a subagent's ticket. */
+/** A task as the pet and the browser view show it: a to-do item, a task, a subagent's ticket, or (proxy food) a prompt turn. */
 export type TaskStatus = 'pending' | 'in_progress' | 'completed' | 'failed' | 'deleted'
 
 export type TaskItem = {
-  /** Namespaced and stable: `todo:<agent>:<hash of the content>`, `task:<id>`, `agent:<agent id>`. */
+  /** Namespaced and stable: `todo:<agent>:<hash of the content>`, `task:<id>`, `agent:<agent id>`, `turn:<turn id>`. */
   id: string
-  src: 'todo' | 'task' | 'agent'
+  src: 'todo' | 'task' | 'agent' | 'turn'
   /** The agent working on it ('main' or an agent id); absent for a task nobody took. */
   owner?: string
   title: string
@@ -162,13 +162,16 @@ export type TaskItem = {
   t: number
 }
 
-/** What the mod keeps of the tasks: the to-do items of every agent, the shared tasks, and how many each agent has finished. Tickets are not stored (they come from the cards). */
-export type TaskBook = { todo: TaskItem[]; task: TaskItem[]; eaten: Record<string, number> }
+/** What the mod keeps of the tasks: the to-do items of every agent, the shared tasks, the prompt turns (proxy food), and how many each agent has finished. Tickets are not stored (they come from the cards). */
+export type TaskBook = { todo: TaskItem[]; task: TaskItem[]; turn: TaskItem[]; eaten: Record<string, number> }
 
 /** Parent links the engine reports for subagents (agent id -> parent agent id, 'main' for the main loop). */
 export type Parents = Record<string, string>
 
 export type Web = { isOn: boolean; dir: string; lastWriteAt: number }
+
+/** /crew setup: whether the session has Claude Code's own task tools (null = the tool list could not be read). */
+export type Setup = { native: boolean | null }
 
 /** What the desktop pet asked the Crew pane to show (overlay/main.js writes it to pet-inbox.json). */
 export type PetFocus = {
@@ -224,6 +227,8 @@ declare module 'claude-code' {
       sessionTitle: string
       /** How many rows the pane's tree has, as the engine last measured it; 0 until measured. */
       paneRows: number
+      /** Which task tools this session has; decides whether the prompt turns are food (see food from). */
+      setup: Setup
     }
   }
 }

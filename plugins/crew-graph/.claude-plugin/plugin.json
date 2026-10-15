@@ -1,6 +1,6 @@
 {
   "name": "crew-graph",
-  "version": "0.11.0",
+  "version": "0.12.0",
   "description": "Live agent dashboard with Clawd crabs: model vitals, permission gate, architect, subagent cards, the agent tree and plan/doc graph, and a three.js 3D view of agents interacting, in the pane (/crew 3d) or the browser (/crew web). Absorbs Flightdeck",
   "types": "./types/index.d.ts",
   "author": {
@@ -23,6 +23,17 @@
     "characters"
   ],
   "userConfig": {
+    "foodFrom": {
+      "title": "Food from",
+      "description": "What the characters eat. auto: the agents' to-do lists, plus each prompt you send when this session has no task tools (TodoWrite, TaskCreate); todos: just the to-do lists; todos+work: the lists and each prompt you send. Subagent tickets are always food",
+      "type": "string",
+      "options": [
+        "auto",
+        "todos",
+        "todos+work"
+      ],
+      "default": "auto"
+    },
     "architectPattern": {
       "title": "Architect pattern",
       "description": "Regular expression (case-insensitive) for the agent types and server tools that count as the on-call architect, e.g. advisor|architect|reviewer",

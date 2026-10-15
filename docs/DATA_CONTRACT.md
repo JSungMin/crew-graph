@@ -111,13 +111,14 @@ type PetRequest = { seq: number; at: number; sessionId: string; token: string } 
 
 ## Tasks
 
-`tasks` lists what the agents have to do, from three sources, as one list. Every title is one line, credentials masked, cut to about 80 cells (`active` to about 60).
+`tasks` lists what the agents have to do, from four sources, as one list. Every title is one line, credentials masked, cut to about 80 cells (`active` to about 60; a `turn` title to about 60).
 
 ```ts
 type Task = {
   id: string                  // stable and namespaced: "todo:<agent>:<hash of the content>" (a repeat of the same text in one list gets "#2"...),
-                              // "task:<id>" for TaskCreate / TaskUpdate, "agent:<agent id>" for a subagent's ticket
-  src: 'todo' | 'task' | 'agent'
+                              // "task:<id>" for TaskCreate / TaskUpdate, "agent:<agent id>" for a subagent's ticket,
+                              // "turn:<turn id>" for a prompt turn of the main loop (a waiting prompt: "turn:q<n>" until its turn starts)
+  src: 'todo' | 'task' | 'agent' | 'turn'
   owner?: string              // the agent working on it ("main" or an agent id); absent for a task nobody took
   title: string
   active?: string             // the present-continuous form ("Running tests"), for while it is in progress
@@ -131,8 +132,9 @@ type Task = {
 - **`todo`** is a `TodoWrite` call. Each call is that agent's *whole* list and replaces its previous one. An item that was open and is missing from the new list becomes `deleted`; a closed one just leaves. The agent is the one whose loop made the call (the call's `agentId`, `main` when it has none).
 - **`task`** is `TaskCreate` (its id comes from the result's `task.id`) and `TaskUpdate` (`status`, `subject`, `activeForm`, `addBlockedBy`, `owner`). The owner is the agent that last set the task `in_progress`, or the `owner` field when it names a known agent (an id, or the type or name it was started under); a task nobody took has no owner.
 - **`agent`** is a ticket for every subagent card, so there are tickets even when no agent uses the task tools. `owner` is the child, `title` its description, `deliverTo` its parent. `running` is `in_progress`, `done` is `completed`, `failed` and `stopped` are `failed`. An architect started as a consult has no card, so no ticket.
+- **`turn`** is proxy food, for a session whose model has no task tools (and on request, see *food from* in the guide): each prompt the user sends is one item owned by `main`. `title` is the prompt (the user's own words; a question typed into the pet is titled by those words, not by the frame the engine puts round it), one line, credentials masked, about 60 cells. It is `pending` while it waits behind a running turn, `in_progress` while its turn runs, `completed` when the turn answers (`main` eats it) and `failed` when the turn is aborted or ends in an error or a refusal. Turns the engine opens on its own (a hand-back, a task notification) and subagents' turns are not items. A page that does not know `turn` can read it as `todo` (an item with an owner and a status).
 - **What is listed:** every open task (up to 40; the subagent tickets come first, so the cap never cuts one), the last 10 closed ones (`completed`, `failed`), and `deleted` ones for 5 s after they were deleted, so the page can play the smoke puff.
-- **`eaten`** counts, per agent, the tasks that turned `completed` since the session began (or `/crew reset`): the counter does not shrink when old closed tasks fall out of the list, and it is back to nothing after `/crew reset`. A ticket counts for the parent; a `task` for its owner, or for `main` when it has none.
+- **`eaten`** counts, per agent, the tasks that turned `completed` since the session began (or `/crew reset`): the counter does not shrink when old closed tasks fall out of the list, and it is back to nothing after `/crew reset`. A ticket counts for the parent; a `task` for its owner, or for `main` when it has none; a `turn` for `main`.
 
 ## Characters
 
