@@ -1571,9 +1571,9 @@ function overlayStep(dt, now) {
 /* ---- shaking the window: the carry velocity (px/s) the main process sends, its direction reversals, and springs that make limbs follow through */
 // A shake = 3 or more reversals of the carry velocity within 1.2 s, each from a speed over SHAKE_MIN_V. Its energy E (0..1) grows with the
 // count and the speed, so a hard shake looks different from a sway. E feeds the carried character's flail and the dizziness `dz`; the window
-// itself is a spring box that the other characters, and the files, are knocked about by.
+// itself, W (= E), knocks the other characters and the files about; they settle as E decays.
 const SHAKE_MIN_V = 330, SHAKE_DEAD = 90;
-const shake = { revs: [], sgn: [0, 0], pk: [0, 0], lastRev: [0, 0], E: 0, dz: 0, vx: 0, vy: 0, W: 0, box: { x: 0, xv: 0, y: 0, yv: 0 } };
+const shake = { revs: [], sgn: [0, 0], pk: [0, 0], lastRev: [0, 0], E: 0, dz: 0, vx: 0, vy: 0, W: 0 };
 function noteCarryVelocity(vx, vy) {
   const now = nowS(); shake.vx = vx; shake.vy = vy;
   [vx, vy].forEach((vel, i) => {
@@ -1595,19 +1595,14 @@ function sstep(s, tgt, w, z, dt) { // a damped spring, two sub-steps
 const newSpring = () => ({ x: 0, v: 0 });
 function newSprings() { return { ax: newSpring(), ay: newSpring(), bx: newSpring(), by: newSpring(), ly: newSpring(), ex: newSpring(), ey: newSpring(), tx: newSpring(), hx: newSpring(), hy: newSpring() }; }
 function shakeStep(dt, now) {
-  const S = shake, bx = S.box;
+  const S = shake;
   while (S.revs.length && now - S.revs[0].t > 1.2) S.revs.shift();
   const n = S.revs.length;
   let tgt = 0;
   if (n >= 3) tgt = clamp((n - 2) / 5, 0, 1) * clamp(S.revs.reduce((s, r) => s + r.pk, 0) / n / 1400, 0.35, 1);
   S.E += (tgt - S.E) * (1 - Math.exp(-dt * (tgt > S.E ? 12 : 2.5)));
   if (carry) { S.dz += S.E * dt * 1.0; S.dz *= Math.exp(-dt * 0.12); } else { S.vx *= Math.exp(-dt * 8); S.vy *= Math.exp(-dt * 8); }
-  const tx = clamp(-S.vx / 900, -1.4, 1.4), ty = clamp(S.vy / 900, -1.4, 1.4), h = Math.min(dt, 0.05) / 2;
-  for (let i = 0; i < 2; i++) {
-    bx.xv += (225 * (tx - bx.x) - 2 * 0.22 * 15 * bx.xv) * h; bx.x += bx.xv * h;
-    bx.yv += (225 * (ty - bx.y) - 2 * 0.22 * 15 * bx.yv) * h; bx.y += bx.yv * h;
-  }
-  S.W = Math.max(S.E, clamp(Math.hypot(bx.xv, bx.yv) / 22, 0, 0.7));
+  S.W = S.E; // how much the box is being shaken: only a shake agitates the others, a plain carry leaves them be
 }
 // A shaken crab that is put down: a hard shake sits it down first, then it staggers (stars circle its head) and shakes it off.
 function startDizzy(a, dz) {
