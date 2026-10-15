@@ -64,13 +64,24 @@ import {
 import type { Config, Panel } from './deck/core'
 import { bigFrame, miniFrame, propFrame } from './clawd'
 import type { CharFs, Scan } from './characters'
-import { describeCharacters, ensureCharacterFolder, scanCharacters, writeCharacters } from './characters'
+import { BUILTIN_CHARACTERS, agentsFromDataJs, describeAgentPicks, describeCharacters, describePetSettings, ensureCharacterFolder, scanCharacters, writeCharacters } from './characters'
 import { absPath, clip, dataJs, describeCall, titleOf, pushEvent, shortPath, snapshotOf, touchFile, verbOfCard, scrollbar } from './crew'
 
 const PANE = 'crew-graph'
 const TITLE = 'Crew'
 const PANE_COLUMNS = 70
-const WEB_FILES = ['index.html', 'app.js', 'three.min.js', 'THREE_LICENSE.txt', 'gltf-loader.classic.js', 'characters-core.js', 'characters.js']
+const WEB_FILES = [
+  'index.html',
+  'app.js',
+  'three.min.js',
+  'THREE_LICENSE.txt',
+  'gltf-loader.classic.js',
+  'characters-core.js',
+  'characters.js',
+  'pet-settings-core.js',
+  'settings.html',
+  'settings.js',
+]
 const WEB_THROTTLE_MS = 450
 
 
@@ -386,7 +397,16 @@ async function charactersCommand($: EngineInterface, spec: string, reload: boole
   if (!home) return 'crew-graph: no home directory to keep characters in.'
   const dir = `${home}/.claude/crew-graph`
   const scan = reload ? await syncCharacters($, dir) : await scanCharacters(charFs($), `${dir}/characters`, false)
-  return describeCharacters(scan, spec, `${dir}/characters`, charRules, reload)
+  // What the pet's Settings window says (a missing or broken file is only reported) and what `auto` gives the agents of the latest snapshot.
+  const petText = await $.fs.read(`${dir}/overlay/pet-settings.json`).catch(() => null)
+  const sid = await petSession($)
+  const snapText = (sid ? await $.fs.read(`${dir}/sessions/${sid}.js`).catch(() => null) : null) ?? (await $.fs.read(`${dir}/data.js`).catch(() => null))
+  const pool = [...BUILTIN_CHARACTERS, ...scan.chars.map(c => ({ id: c.id, traits: c.kind === 'voxel' ? c.traits : [] }))]
+  const extra = [
+    ...describePetSettings(typeof petText === 'string' ? petText : null),
+    ...describeAgentPicks(agentsFromDataJs(typeof snapText === 'string' ? snapText : null), pool),
+  ]
+  return describeCharacters(scan, spec, `${dir}/characters`, charRules, reload, extra)
 }
 
 /** Inside Orca, a browser tab beside the terminal (full pixels, real mouse); else the system browser. */
@@ -410,12 +430,16 @@ async function openInBrowser($: EngineInterface, page: string): Promise<string> 
 
 const ELECTRON_VERSION = '44.4.5'
 const PET_POLL_MS = 1000
+/** One install at a time across sessions: a lock older than this is a crashed install, not a running one. */
+const INSTALL_STALE_MS = 15 * 60_000
+const INSTALL_WAIT_MS = 2000
 
 const PET_HELP = [
   'Crew pet: the crabs on your desktop, with no background.',
   '  press a crab and pull to carry the window · shake it while carrying and it gets dizzy · click to pinch · stroke it (button up) to pet',
   '  right-drag to rotate · wheel to zoom · Ctrl+wheel or the corner grip to resize',
-  '  click a file to open it · Shift+click shows it in the folder · right-click for the menu',
+  '  click a file to open it · Shift+click shows it in the folder · right-click for the menu: Character (who is drawn as what), Settings…',
+  '  the tray icon has Settings… too: characters per agent type or per agent, bubbles, ticker, papers, nameplate, reduced motion, opacity, size',
   '  the pill on top names this session (folder · first prompt); drag it to carry the window',
   '/crew pet off closes the window of this session, /crew pet off all every window.',
 ].join('\n')
@@ -431,9 +455,11 @@ async function petPaths($: EngineInterface): Promise<PetPaths | null> {
   const home = await homeDir($)
   if (!home) return null
   const dir = `${home}/.claude/crew-graph`
+  // Test only: CREW_PET_RUNTIME names another folder to install Electron into (the default is overlay-runtime next to the viewer).
+  const runtimeEnv = String((await $.env.get('CREW_PET_RUNTIME').catch(() => '')) ?? '').replace(/\\/g, '/')
   return {
     dir,
-    runtime: `${dir}/overlay-runtime`,
+    runtime: runtimeEnv || `${dir}/overlay-runtime`,
     state: `${dir}/overlay`,
     page: `${dir}/index.html`,
     main: `${$.plugin.root}/overlay/main.js`,
@@ -507,14 +533,56 @@ async function petNotify($: EngineInterface, text: string) {
   await say($, 'crew pet', text).catch(() => undefined)
 }
 
+const sleepFor = ($: EngineInterface, ms: number) => new Promise<void>(resolve => $.clock.after(ms, () => resolve()))
+
+// The install lock is a file in the runtime folder: "held:<token>:<ms>" while an install runs, "free:<ms>" after. A session that starts
+// while another installs waits for it (instead of running npm in the same folder), then opens its own window. The host has no
+// delete, so a finished install writes "free"; a "held" older than INSTALL_STALE_MS is taken over.
+const petLockFile = (p: PetPaths) => `${p.runtime}/install.lock`
+
+async function petLockTake($: EngineInterface, p: PetPaths, token: string): Promise<boolean> {
+  const now = await $.clock.now()
+  const cur = await $.fs.read(petLockFile(p)).catch(() => null)
+  const m = typeof cur === 'string' ? /^held:([^:]*):(\d+)/.exec(cur.trim()) : null
+  if (m && now - Number(m[2]) < INSTALL_STALE_MS && m[1] !== token) return false
+  await $.fs.write(petLockFile(p), `held:${token}:${now}`)
+  // Two sessions can write at the same moment: the one whose token is still there after the write owns it.
+  const back = await $.fs.read(petLockFile(p)).catch(() => null)
+  return typeof back === 'string' && back.startsWith(`held:${token}:`)
+}
+
+async function petLockFree($: EngineInterface, p: PetPaths, token: string) {
+  const cur = await $.fs.read(petLockFile(p)).catch(() => null)
+  if (typeof cur === 'string' && !cur.startsWith(`held:${token}:`)) return // taken over after a long install: not ours to free
+  await $.fs.write(petLockFile(p), `free:${await $.clock.now()}`).catch(() => undefined)
+}
+
+/** Installs Electron (one session at a time), then opens this session's window. Toasts: installing, then "ready" or the error. */
 async function petInstallThenLaunch($: EngineInterface, p: PetPaths) {
-  await toast($, 'crew pet: downloading Electron (about 100 MB), once. It starts when that is done.')
-  const err = await petInstall($, p)
-  if (err) return petNotify($, `crew pet: ${err}`)
+  const token = `${await petSession($)}-${(await $.clock.now()).toString(36)}`
+  let waited = false
+  while (!(await petElectron($, p))) {
+    if (await petLockTake($, p, token)) {
+      await toast($, 'crew pet: installing Electron (~100 MB)… the pet opens by itself when it is done.')
+      let err = ''
+      try {
+        err = await petInstall($, p)
+      } finally {
+        await petLockFree($, p, token)
+      }
+      if (err) return petNotify($, `crew pet: ${err}`)
+      break
+    }
+    if (!waited) {
+      waited = true
+      await toast($, 'crew pet: another session is installing Electron; this one opens when it is done.')
+    }
+    await sleepFor($, INSTALL_WAIT_MS)
+  }
   const bin = await petElectron($, p)
   if (!bin) return petNotify($, 'crew pet: npm finished but no Electron binary was found')
   const text = await petLaunch($, p, bin)
-  await petNotify($, text === PET_HELP ? 'crew pet: started' : text)
+  await petNotify($, text === PET_HELP ? 'crew pet: ready' : text)
 }
 
 /** /crew pet: the viewer and its data, Electron, then the window. A first run installs Electron in the background. */
@@ -531,7 +599,7 @@ async function petStart($: EngineInterface): Promise<string> {
     .finally(() => {
       petInstalling = false
     })
-  return `Installing Electron ${ELECTRON_VERSION} (about 100 MB) for the pet, once, in ${p.runtime}. It starts when that is done.`
+  return `Installing Electron ${ELECTRON_VERSION} (about 100 MB) for the pet, once, in ${p.runtime}. The pet opens by itself when that is done (a toast says so).`
 }
 
 /** /crew pet off closes this session's window, /crew pet off all quits the pet with every window. */

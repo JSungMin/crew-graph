@@ -403,36 +403,112 @@ test('/crew pet starts the overlay through launch.mjs and says how to use it', a
   for (const w of ['carry', 'pinch', 'pet', 'rotate', 'zoom', 'resize', 'menu', '/crew pet off']) expect(text).toContain(w)
 })
 
-test('/crew pet without Electron installs it into the runtime folder first, then starts', async ($, on) => {
-  const clock = engine(on)
+/** A runtime folder as the mod sees it: Electron appears when install.js has run; install.lock keeps what the mod wrote (or what "another session" put there). */
+const petHost = (on: On, opts: { lock?: string; session?: string; npmFails?: string } = {}) => {
   const runs: { argv: readonly string[]; cwd?: string; timeoutMs?: number }[] = []
-  const written: string[] = []
-  let installed = false
+  const written: { path: string; text: string }[] = []
+  const toasts: string[] = []
+  const state = { installed: false, lock: opts.lock ?? '' }
   on('env.get', (_$, e) => ({ value: e.name === 'USERPROFILE' ? 'C:/Users/me' : e.name === 'OS' ? 'Windows_NT' : undefined }))
-  on('fs.read', (_$, e) => ({ value: `// ${e.path}` }))
+  on('fs.read', (_$, e) => ({ value: /install\.lock$/.test(e.path) ? state.lock : `// ${e.path}` }))
   on('fs.write', (_$, e) => {
-    written.push(e.path.replace(/\\/g, '/'))
+    written.push({ path: e.path.replace(/\\/g, '/'), text: e.text })
+    if (/install\.lock$/.test(e.path)) state.lock = e.text
     return { value: undefined }
   })
-  on('fs.exists', (_$, e) => ({ value: installed && isElectron(e.path) }))
+  on('fs.exists', (_$, e) => ({ value: state.installed && isElectron(e.path) }))
   on('process.run', (_$, e) => {
     runs.push({ argv: e.argv, cwd: e.init?.cwd, timeoutMs: e.init?.timeoutMs })
-    if (e.argv[1] === 'node_modules/electron/install.js') installed = true
+    if (opts.npmFails && e.argv.includes('npm')) return { value: { ...ok, exitCode: 1, stdout: '', stderr: opts.npmFails } }
+    if (e.argv[1] === 'node_modules/electron/install.js') state.installed = true
     return { value: ok }
   })
-  on('session.id', () => ({ value: 'sess-p2' }))
+  on('ui.toast', (_$, e) => {
+    toasts.push(String((e as { text?: unknown }).text ?? ''))
+    return { value: undefined }
+  })
+  on('session.id', () => ({ value: opts.session ?? 'sess-p2' }))
+  return { runs, written, toasts, state }
+}
+const launched = (runs: { argv: readonly string[] }[]) => runs.filter(r => r.argv[1]?.endsWith('launch.mjs'))
+
+test('/crew pet without Electron installs it into the runtime folder first, then starts', async ($, on) => {
+  const clock = engine(on)
+  const { runs, written, toasts, state } = petHost(on)
   const { text } = await $.command.run({ command: 'crew', args: 'pet' } as never)
   expect(text).toContain('44.4.5')
-  for (let i = 0; i < 40 && !runs.some(r => r.argv[1]?.endsWith('launch.mjs')); i += 1) await clock.advance(10)
+  for (let i = 0; i < 40 && launched(runs).length === 0; i += 1) await clock.advance(10)
   await clock.advance(10)
-  expect(written.some(w => w === 'C:/Users/me/.claude/crew-graph/overlay-runtime/README.txt')).toBe(true)
+  expect(written.some(w => w.path === 'C:/Users/me/.claude/crew-graph/overlay-runtime/README.txt')).toBe(true)
   const npm = runs[0]
   // process.run has no shell: npm is reached through cmd on Windows.
   expect(npm?.argv).toEqual(['cmd', '/c', 'npm', 'install', '--no-audit', '--no-fund', '--prefix', '.', 'electron@44.4.5'])
   expect(npm?.cwd).toBe('C:/Users/me/.claude/crew-graph/overlay-runtime')
   expect(npm?.timeoutMs).toBe(600_000)
   expect(runs[1]?.argv).toEqual(['node', 'node_modules/electron/install.js'])
-  expect(runs[2]?.argv[1]).toMatch(/overlay[/\\]launch\.mjs$/)
+  // the same chain opens the pet: launch.mjs with this session's id, once
+  expect(launched(runs).length).toBe(1)
+  const launch = launched(runs)[0]?.argv ?? []
+  expect(launch.slice(launch.indexOf('--session'), launch.indexOf('--session') + 2)).toEqual(['--session', 'sess-p2'])
+  expect(launch).toContain('--electron')
+  // toasts: installing at the start, ready at the end; the lock was taken for the install and let go after it
+  expect(toasts.some(x => x.includes('installing Electron (~100 MB)'))).toBe(true)
+  expect(toasts.at(-1)).toContain('ready')
+  expect(written.filter(w => w.path.endsWith('install.lock')).map(w => w.text.split(':')[0])).toEqual(['held', 'free'])
+  expect(state.lock.startsWith('free:')).toBe(true)
+})
+
+test('a failed install ends with the error and its tail, takes the lock off, and opens nothing', async ($, on) => {
+  const clock = engine(on)
+  const { runs, toasts, state } = petHost(on, { npmFails: 'npm ERR! network offline\nnpm ERR! last line' })
+  await $.command.run({ command: 'crew', args: 'pet' } as never)
+  for (let i = 0; i < 40; i += 1) await clock.advance(10)
+  expect(launched(runs).length).toBe(0)
+  expect(toasts.some(x => x.includes('npm install electron@44.4.5 failed') && x.includes('npm ERR! last line'))).toBe(true)
+  expect(state.lock.startsWith('free:')).toBe(true)
+})
+
+test('a second session that starts while another installs waits for it, then opens its own window; it never runs npm', async ($, on) => {
+  const clock = engine(on)
+  // "another session" took the lock a moment ago (the engine's clock starts at 0, so a held lock at 0 is fresh)
+  const { runs, toasts, state } = petHost(on, { lock: 'held:other-session-1:0', session: 'sess-second' })
+  const { text } = await $.command.run({ command: 'crew', args: 'pet' } as never)
+  expect(text).toContain('44.4.5')
+  await clock.advance(5000)
+  expect(runs.some(r => r.argv.includes('npm'))).toBe(false)
+  expect(launched(runs).length).toBe(0)
+  expect(toasts.some(x => x.includes('another session is installing Electron'))).toBe(true)
+  // the other session finishes: Electron is there and the lock is free
+  state.installed = true
+  state.lock = 'free:4000'
+  for (let i = 0; i < 20 && launched(runs).length === 0; i += 1) await clock.advance(2000)
+  expect(runs.some(r => r.argv.includes('npm'))).toBe(false)
+  const launch = launched(runs)[0]?.argv ?? []
+  expect(launch.slice(launch.indexOf('--session'), launch.indexOf('--session') + 2)).toEqual(['--session', 'sess-second'])
+  expect(toasts.at(-1)).toContain('ready')
+})
+
+test('a lock older than 15 minutes is a crashed install: the next session takes it over and installs', async ($, on) => {
+  const clock = engine(on)
+  const { runs, state } = petHost(on, { lock: 'held:crashed-1:0' })
+  await clock.advance(16 * 60_000)
+  await $.command.run({ command: 'crew', args: 'pet' } as never)
+  for (let i = 0; i < 40 && launched(runs).length === 0; i += 1) await clock.advance(10)
+  expect(runs.some(r => r.argv.includes('npm'))).toBe(true)
+  expect(launched(runs).length).toBe(1)
+  expect(state.lock.startsWith('free:')).toBe(true)
+})
+
+test('/crew pet twice in one session starts one install', async ($, on) => {
+  const clock = engine(on)
+  const { runs } = petHost(on)
+  const [a, b] = await Promise.all([$.command.run({ command: 'crew', args: 'pet' } as never), $.command.run({ command: 'crew', args: 'pet' } as never)])
+  const texts = [a, b].map(r => r?.text ?? '')
+  expect(texts.filter(x => x.includes('Installing Electron')).length).toBe(1)
+  expect(texts.filter(x => x.includes('still downloading')).length).toBe(1)
+  for (let i = 0; i < 40 && launched(runs).length === 0; i += 1) await clock.advance(10)
+  expect(runs.filter(r => r.argv.includes('npm')).length).toBe(1)
+  expect(launched(runs).length).toBe(1)
 })
 
 test('/crew pet off closes the window of this session, /crew pet off all quits the pet', async ($, on) => {

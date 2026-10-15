@@ -3,6 +3,8 @@
 //
 //   electron main.js --page <index.html> --state <dir> [--session <id>] [--orca]
 //   electron main.js ... --shot <png> [--demo [busy|lineup]] [--chars "main=crab, *=random"] [--at x,y]     one picture, then exit
+//   electron main.js ... --shot-settings <png> [--demo]               a picture of the Settings window, then exit
+//   electron main.js ... --pet-settings '<json>'                      (with --shot*) the pet settings to start from
 //   electron main.js ... --selftest                                   exercises the resize path, prints bounds
 //
 // One process, one window per Claude session: a second start with another --session opens another window,
@@ -12,6 +14,8 @@
 // for over overlay/preload.js. It reads a session's file only to know which files its snapshot lists; it never
 // opens or reads a path that is not listed there.
 //   <state>/overlay-state.json   { alwaysOnTop, ticker, sessions: { <id>: bounds } }
+//   <state>/pet-settings.json     the pet's settings (web/pet-settings-core.js): characters, what is shown, motion, window. This
+//                                 process reads, validates and writes it (never ~/.claude/settings.json) and tells every window.
 //   <state>/quit                  quit everything (launch.mjs --quit)
 //   <state>/close-<id>            close that session's window (launch.mjs --close <id>)
 //   <state>/pet-inbox-<id>.json   "show this in the Crew pane" requests for that session's mod
@@ -21,6 +25,7 @@ const os = require('node:os')
 const path = require('node:path')
 const { execFile } = require('node:child_process')
 const { pathToFileURL } = require('node:url')
+const petCore = require('../web/pet-settings-core.js')
 
 const parseArgs = argv => {
   const arg = (name, fallback = '') => {
@@ -34,14 +39,17 @@ const mine = parseArgs(process.argv)
 const { arg, has } = mine
 
 const shotOut = arg('shot')
+const shotSettings = arg('shot-settings')
 const selftest = has('selftest')
 const isDemo = has('demo')
 const demoMode = isDemo ? arg('demo') || '1' : ''
 const stateDir = arg('state') || path.join(os.homedir(), '.claude', 'crew-graph', 'overlay')
 const pageFile = arg('page') || path.join(stateDir, '..', 'index.html')
 const stateFile = path.join(stateDir, 'overlay-state.json')
+const settingsFile = path.join(stateDir, 'pet-settings.json')
+const settingsPage = path.join(path.dirname(pageFile), 'settings.html')
 const quitFile = path.join(stateDir, 'quit')
-const isScratch = !!shotOut || selftest // no single-instance lock, no saved state
+const isScratch = !!shotOut || !!shotSettings || selftest // no single-instance lock, no saved state
 // Debug aid: CREW_PET_LOG=<file> logs what the page asks for.
 const dbg = process.env.CREW_PET_LOG
   ? msg => {
@@ -80,11 +88,14 @@ const byContents = new Map()
 let tray = null
 let onTop = true
 let ticker = true
+let settings = petCore.sanitize(null) // the pet settings; onTop and ticker below follow them
+let settingsWin = null // the one Settings window, shared by every session
 let saved = {} // id -> bounds, as last saved (windows closed since stay here)
 let legacy = null // bounds of the one window older versions saved
 let lastBounds = null // where the newest window went: the next one cascades from it
 let actionsMod = null // actions.mjs, loaded in start()
 let summaryMod = null // summary.mjs
+let menusMod = null // menus.mjs
 
 // ---------------------------------------------------------------- saved state
 
@@ -214,20 +225,154 @@ function showWin(w) {
   if (!alive(w)) return
   w.win.showInactive()
   if (!isOnScreen(w.win.getBounds())) w.win.setBounds(boundsFor(w.id))
+  raise(w)
 }
 
-function setOnTop(v) {
-  onTop = !!v
-  for (const w of wins.values()) if (alive(w)) w.win.setAlwaysOnTop(onTop, onTop ? 'floating' : 'normal')
-  saveState()
-  refreshTray()
+// Measured on Windows 11 with the Photos app as the viewer of a png: a few seconds after shell.openPath the viewer's window
+// is above the pet's in the z-order although the pet is flagged topmost (isAlwaysOnTop() stays true). showInactive() and a
+// repeated setAlwaysOnTop(true, 'floating') leave it there; moveTop() puts the pet back and takes no focus. Why the OS
+// ranks the viewer above a topmost window is not known.
+const RAISE_EVERY_MS = 400
+const RAISE_FOR_MS = 15000
+
+/** Put the window back on top of the others, without activating it. */
+function raise(w) {
+  if (!alive(w) || !w.win.isVisible()) return
+  try {
+    w.win.moveTop()
+  } catch {
+    /* a window that is going away */
+  }
 }
 
-function setTicker(v) {
-  ticker = !!v
-  for (const w of wins.values()) sendTo(w, { type: 'ticker', on: ticker })
+/** A viewer takes a second or two to come up: keep the pet on top for a while after something was handed to the OS. */
+function raiseFor(w, ms = RAISE_FOR_MS) {
+  if (!alive(w)) return
+  clearInterval(w.raiseTimer)
+  const until = Date.now() + ms
+  if (onTop) raise(w)
+  w.raiseTimer = setInterval(() => {
+    if (!alive(w) || Date.now() > until) return clearInterval(w.raiseTimer)
+    if (onTop) raise(w)
+  }, RAISE_EVERY_MS)
+}
+
+/**
+ * Hand something to the OS (open a file, show it in the folder): the press that started it may never get its release
+ * once another app is in front, so any gesture is ended and the page forgets its pointer state; and the pet stays on top.
+ */
+function runAction(w, run) {
+  stopGesture(w)
+  sendTo(w, { type: 'reset-input' })
+  if (onTop) raiseFor(w)
+  return run().then(r => {
+    dbg(`action ${r}`)
+    sendTo(w, { type: 'reset-input' })
+    return r
+  })
+}
+
+const setOnTop = v => void applyPatch({ alwaysOnTop: !!v })
+const setTicker = v => void applyPatch({ show: { ticker: !!v } })
+
+// ---------------------------------------------------------------- pet settings
+
+/** Everything that listens: every pet window, and the Settings window. */
+function broadcastSettings() {
+  for (const w of wins.values()) if (alive(w)) w.win.webContents.send('pet:settings', settings)
+  if (settingsWin && !settingsWin.isDestroyed()) settingsWin.webContents.send('pet:settings', settings)
+}
+
+/** Grow or shrink every window to a size preset, around its centre. */
+function applySize(preset) {
+  const sz = petCore.SIZES[preset]
+  if (!sz) return
+  for (const w of wins.values()) {
+    if (!alive(w)) continue
+    if (w.collapsed) {
+      w.full = { ...w.full, width: sz.width, height: sz.height }
+      continue
+    }
+    const b = w.win.getBounds()
+    const nb = { x: Math.round(b.x + (b.width - sz.width) / 2), y: Math.round(b.y + (b.height - sz.height) / 2), width: sz.width, height: sz.height }
+    w.win.setBounds(isOnScreen(nb) ? nb : { ...nb, x: b.x, y: b.y })
+  }
+}
+
+/** Takes new settings (checked again here), makes the windows match, writes the file, tells everyone. Returns what is now in force. */
+function changeSettings(next, size) {
+  const prev = settings
+  settings = petCore.sanitize(next)
+  onTop = settings.alwaysOnTop
+  ticker = settings.show.ticker
+  if (!isScratch) {
+    try {
+      petCore.save(fs, settingsFile, settings)
+    } catch (e) {
+      dbg(`settings not saved ${e && e.message}`)
+    }
+  }
+  if (prev.alwaysOnTop !== settings.alwaysOnTop) for (const w of wins.values()) if (alive(w)) w.win.setAlwaysOnTop(onTop, onTop ? 'floating' : 'normal')
+  if (prev.opacity !== settings.opacity) for (const w of wins.values()) if (alive(w)) w.win.setOpacity(settings.opacity / 100)
+  if (size) applySize(size)
   saveState()
+  broadcastSettings()
   refreshTray()
+  dbg(`settings ${JSON.stringify(settings)}`)
+  return settings
+}
+
+/** A change from a page or a menu: merged into the settings, every key checked. A size preset in it also resizes the windows. */
+function applyPatch(patch) {
+  const size = patch && typeof patch === 'object' && typeof patch.size === 'string' && petCore.SIZES[patch.size] ? patch.size : ''
+  return changeSettings(petCore.merge(settings, patch), size)
+}
+
+/** The one Settings window: a second request only brings it forward. */
+async function openSettings() {
+  if (settingsWin && !settingsWin.isDestroyed()) {
+    settingsWin.show()
+    settingsWin.focus()
+    return settingsWin
+  }
+  const wa = screen.getPrimaryDisplay().workArea
+  const width = 580
+  const height = Math.min(720, wa.height - 40)
+  const win = new BrowserWindow({
+    width,
+    height,
+    x: wa.x + Math.round((wa.width - width) / 2),
+    y: wa.y + Math.round((wa.height - height) / 2),
+    transparent: true,
+    frame: false,
+    backgroundColor: '#00000000',
+    hasShadow: false,
+    resizable: false,
+    show: false,
+    title: 'Crew pet settings',
+    webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true, nodeIntegration: false, sandbox: true },
+  })
+  settingsWin = win
+  win.removeMenu()
+  win.on('closed', () => {
+    if (settingsWin === win) settingsWin = null
+  })
+  if (process.env.CREW_PET_LOG) win.webContents.on('console-message', (e, ...rest) => dbg(`settings page ${e && e.message !== undefined ? e.message : rest[1]}`))
+  await win.loadFile(settingsPage, { query: { preview: '1' } })
+  win.show()
+  win.focus()
+  dbg('settings window open')
+  return win
+}
+
+const clipText = (v, n) => (typeof v === 'string' ? v.slice(0, n) : '')
+/** What the Settings window may list: every window's session and the agents its page says it shows (id, type, task). */
+function settingsContext() {
+  return {
+    windows: [...wins.values()]
+      .filter(alive)
+      .map(w => ({ session: w.id, name: nameOf(w), agents: w.seen || [] })),
+  }
 }
 
 /** Fold the window down to its title bar (the pill), or open it up to the size it had. */
@@ -267,6 +412,7 @@ function closeWindow(id) {
   wins.delete(id)
   stopGesture(w, true)
   clearInterval(w.cursorTimer)
+  clearInterval(w.raiseTimer)
   if (alive(w)) {
     byContents.delete(w.win.webContents.id)
     w.win.destroy()
@@ -289,36 +435,40 @@ function nameOf(w) {
 }
 
 function windowItems(w) {
-  const items = [
-    { label: 'Show', click: () => showWin(w) },
-    { label: w && w.collapsed ? 'Expand' : 'Collapse to title bar', click: () => setCollapsed(w, !(w && w.collapsed)) },
-    { label: 'Always on top', type: 'checkbox', checked: onTop, click: i => setOnTop(i.checked) },
-    { label: 'Activity ticker', type: 'checkbox', checked: ticker, click: i => setTicker(i.checked) },
-    { label: 'Reset position & size', click: () => resetBounds(w) },
-  ]
-  if (w && w.id) items.push({ label: 'Close this window', click: () => closeWindow(w.id) })
-  items.push({ type: 'separator' }, { label: 'Quit', click: quit })
-  return items
+  return menusMod.windowItems(
+    { collapsed: !!(w && w.collapsed), onTop, ticker, hasId: !!(w && w.id) },
+    {
+      show: () => showWin(w),
+      settings: () => void openSettings(),
+      collapse: () => setCollapsed(w, !(w && w.collapsed)),
+      onTop: setOnTop,
+      ticker: setTicker,
+      reset: () => resetBounds(w),
+      close: () => closeWindow(w.id),
+      quit,
+    },
+  )
 }
 
 function trayItems() {
-  const sessions = [...wins.values()].map(w => ({
-    label: nameOf(w),
-    submenu: [
-      { label: 'Show', click: () => showWin(w) },
-      { label: w.collapsed ? 'Expand' : 'Collapse to title bar', click: () => setCollapsed(w, !w.collapsed) },
-      { label: 'Close', click: () => closeWindow(w.id) },
-    ],
-  }))
-  return [
-    ...(sessions.length ? [{ label: 'Sessions', enabled: false }, ...sessions, { type: 'separator' }] : []),
-    { label: 'Show all', click: () => wins.forEach(showWin) },
-    { label: 'Always on top', type: 'checkbox', checked: onTop, click: i => setOnTop(i.checked) },
-    { label: 'Activity ticker', type: 'checkbox', checked: ticker, click: i => setTicker(i.checked) },
-    { label: 'Reset position & size', click: () => wins.forEach(resetBounds) },
-    { type: 'separator' },
-    { label: 'Quit', click: quit },
-  ]
+  const byId = id => [...wins.values()].find(w => w.id === id)
+  return menusMod.trayItems(
+    { sessions: [...wins.values()].map(w => ({ id: w.id, name: nameOf(w), collapsed: !!w.collapsed })), onTop, ticker },
+    {
+      showOne: id => showWin(byId(id)),
+      collapseOne: id => {
+        const w = byId(id)
+        setCollapsed(w, !(w && w.collapsed))
+      },
+      closeOne: id => closeWindow(id),
+      showAll: () => wins.forEach(showWin),
+      settings: () => void openSettings(),
+      onTop: setOnTop,
+      ticker: setTicker,
+      reset: () => wins.forEach(resetBounds),
+      quit,
+    },
+  )
 }
 
 function refreshTray() {
@@ -362,6 +512,7 @@ async function createWindow(id, orca) {
   // Across displays with different scaling the constructor can land a few pixels off: say it again.
   win.setBounds(shown)
   win.setAlwaysOnTop(onTop, onTop ? 'floating' : 'normal')
+  win.setOpacity(settings.opacity / 100)
   win.setIgnoreMouseEvents(true, { forward: true })
   win.removeMenu()
   // With CREW_PET_LOG set, what the page writes to its console lands in the log too.
@@ -379,11 +530,16 @@ async function createWindow(id, orca) {
   win.showInactive()
   win.on('moved', saveState)
   win.on('resized', saveState)
+  win.on('show', () => sendTo(w, { type: 'reset-input' }))
+  win.on('restore', () => {
+    sendTo(w, { type: 'reset-input' })
+    raise(w)
+  })
   // The page asks for forwarded mouse moves while it lets clicks through. This is a second source for the
   // cursor, a few times a second and only while click-through is on, in case those do not arrive.
   if (!isScratch) {
     w.cursorTimer = setInterval(() => {
-      if (!alive(w) || !w.ignoring || w.gesture || !w.win.isVisible()) return
+      if (!alive(w) || w.gesture || !w.win.isVisible()) return
       const c = screen.getCursorScreenPoint()
       const b = w.win.getBounds()
       const x = c.x - b.x
@@ -392,6 +548,9 @@ async function createWindow(id, orca) {
       const key = inside ? `${x},${y}` : 'out'
       if (key === w.cursor) return
       w.cursor = key
+      // While the window takes clicks the page sees its own moves; only the cursor leaving needs telling (a window that was
+      // covered gets no leave event of its own, and would keep taking clicks over its whole rectangle).
+      if (!w.ignoring && inside) return
       sendTo(w, { type: 'cursor', x: inside ? x : -1, y: inside ? y : -1 })
     }, 125)
   }
@@ -461,8 +620,8 @@ function menuFor(w, ctx) {
   const items = []
   if (ctx.kind === 'file') {
     items.push(
-      { label: 'Open', click: () => void w.actions.open(ctx.abs).then(r => dbg(`open ${r}`)) },
-      { label: 'Show in folder', click: () => void w.actions.reveal(ctx.abs).then(r => dbg(`reveal ${r}`)) },
+      { label: 'Open', click: () => void runAction(w, () => w.actions.open(ctx.abs)) },
+      { label: 'Show in folder', click: () => void runAction(w, () => w.actions.reveal(ctx.abs)) },
       { label: 'Show in Crew pane', click: () => focusFile(w, ctx.abs) },
       {
         label: 'Copy path',
@@ -474,7 +633,15 @@ function menuFor(w, ctx) {
       { type: 'separator' },
     )
   } else if (ctx.kind === 'crab' && ctx.id) {
-    items.push({ label: 'Show in Crew pane', click: () => writeInbox(w, { kind: 'focus-agent', id: String(ctx.id).slice(0, 200) }) }, { type: 'separator' })
+    items.push(
+      ...menusMod.crabItems({
+        ctx,
+        settings,
+        session: w.id,
+        act: { set: patch => void applyPatch(patch), focus: () => writeInbox(w, { kind: 'focus-agent', id: String(ctx.id).slice(0, 200) }) },
+        agentKeyOf: petCore.agentKey,
+      }),
+    )
   }
   return Menu.buildFromTemplate([...items, ...windowItems(w)])
 }
@@ -582,10 +749,34 @@ function wireIpc() {
     dbg(`menu ${kind || 'window'}`)
     // A file entry is offered only for a path the snapshot lists.
     if (kind === 'file' && !w.actions.resolve(ctx.abs)) return menuFor(w, {}).popup({ window: w.win })
-    menuFor(w, { kind, id: ctx.id, abs: ctx.abs }).popup({ window: w.win })
+    // The character list is the page's (it knows the user's packs); only ids of the usual form and clipped names are taken.
+    const chars = (Array.isArray(ctx.chars) ? ctx.chars : [])
+      .filter(c => c && typeof c.id === 'string' && /^[A-Za-z0-9._-]{1,40}$/.test(c.id))
+      .slice(0, 100)
+      .map(c => ({ id: c.id, name: clipText(c.name, 60) || c.id }))
+    menuFor(w, { kind, id: clipText(ctx.id, 200), abs: ctx.abs, type: clipText(ctx.type, 80), cur: typeof ctx.cur === 'string' && /^[A-Za-z0-9._-]{1,40}$/.test(ctx.cur) ? ctx.cur : '', chars }).popup({ window: w.win })
   })
-  on('pet:open', (w, abs) => void w.actions.open(abs).then(r => dbg(`open ${r}`)))
-  on('pet:reveal', (w, abs) => void w.actions.reveal(abs).then(r => dbg(`reveal ${r}`)))
+  // The agents a window shows, for the Settings window's lists.
+  on('pet:seen', (w, list) => {
+    w.seen = (Array.isArray(list) ? list : [])
+      .slice(0, 80)
+      .filter(a => a && typeof a.id === 'string')
+      .map(a => ({ id: clipText(a.id, 200), type: clipText(a.type, 80), description: clipText(a.description, 80) }))
+  })
+  // Settings: a pet page or the Settings window may read and change them; what arrives is checked again in changeSettings.
+  const fromSettings = e => !!settingsWin && !settingsWin.isDestroyed() && e.sender === settingsWin.webContents
+  const fromPage = e => byContents.has(e.sender.id) || fromSettings(e)
+  ipcMain.handle('pet:getSettings', e => (fromPage(e) ? settings : null))
+  ipcMain.handle('pet:setSettings', (e, patch) => (fromPage(e) ? applyPatch(patch) : null))
+  ipcMain.handle('pet:settingsContext', e => (fromSettings(e) ? settingsContext() : null))
+  ipcMain.on('pet:resetSettings', e => {
+    if (fromSettings(e)) changeSettings(petCore.defaults(), 'M')
+  })
+  ipcMain.on('pet:closeSettings', e => {
+    if (fromSettings(e)) settingsWin.close()
+  })
+  on('pet:open', (w, abs) => void runAction(w, () => w.actions.open(abs)))
+  on('pet:reveal', (w, abs) => void runAction(w, () => w.actions.reveal(abs)))
   ipcMain.handle('pet:summary', (e, abs) => {
     const w = of(e)
     if (!w) return { error: 'sender' }
@@ -604,10 +795,21 @@ const sessionOf = args => {
 async function start() {
   actionsMod = await import(pathToFileURL(path.join(__dirname, 'actions.mjs')).href)
   summaryMod = await import(pathToFileURL(path.join(__dirname, 'summary.mjs')).href)
+  menusMod = await import(pathToFileURL(path.join(__dirname, 'menus.mjs')).href)
   await app.whenReady()
   const st = isScratch ? {} : loadState()
-  onTop = st.alwaysOnTop !== false
-  ticker = st.ticker !== false
+  // The settings file wins; without one, the two settings older versions kept in overlay-state.json carry over.
+  let fromFile = null
+  if (isScratch) {
+    try {
+      fromFile = petCore.sanitize(JSON.parse(arg('pet-settings') || '{}'))
+    } catch {
+      fromFile = petCore.sanitize(null)
+    }
+  } else fromFile = petCore.load(fs, settingsFile)
+  settings = fromFile || petCore.sanitize({ alwaysOnTop: st.alwaysOnTop !== false, show: { ticker: st.ticker !== false } })
+  onTop = settings.alwaysOnTop
+  ticker = settings.show.ticker
   saved = st.sessions && typeof st.sessions === 'object' ? st.sessions : {}
   legacy = validBounds(st) ? st : null
   wireIpc()
@@ -618,6 +820,7 @@ async function start() {
   const [sw, sh] = size.length === 2 && size.every(isNum) ? size : [DEF_W, DEF_H]
   if (isScratch && at.length === 2 && at.every(isNum)) first.win.setBounds({ x: at[0], y: at[1], width: sw, height: sh })
   if (shotOut) return void shot(first)
+  if (shotSettings) return void settingsShot()
   if (selftest) return void runSelftest(first)
 
   try {
@@ -681,6 +884,22 @@ async function shot(w) {
   const line = `corner-alpha=${bmp[(2 * size.width + 2) * 4 + 3]} content-pixels=${content} size=${size.width}x${size.height}`
   out(line)
   fs.writeFileSync(`${shotOut}.txt`, `${line}\n`)
+  app.exit(0)
+}
+
+/** --shot-settings: the Settings window, once its previews have run for a moment. */
+async function settingsShot() {
+  const win = await openSettings()
+  await new Promise(r => setTimeout(r, 3500))
+  const img = await win.webContents.capturePage()
+  const size = img.getSize()
+  const bmp = img.toBitmap()
+  let content = 0
+  for (let i = 3; i < bmp.length; i += 4) if (bmp[i] > 8) content += 1
+  fs.writeFileSync(shotSettings, img.toPNG())
+  const line = `content-pixels=${content} size=${size.width}x${size.height}`
+  out(line)
+  fs.writeFileSync(`${shotSettings}.txt`, `${line}\n`)
   app.exit(0)
 }
 

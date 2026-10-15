@@ -9,7 +9,7 @@ const rz = (a) => ({ rot: [0, 0, a] });
 
 /* ---- crab: the original Clawd crab, kept as it was drawn before characters existed */
 const crab = {
-  id: 'crab', name: 'Clawd crab', scale: 1,
+  id: 'crab', traits: ['lead', 'main', 'generalist'], name: 'Clawd crab', scale: 1,
   base: { h: 14.8, s: 0.68, l: 0.56, spread: 15 },
   hit: { y: 2.7, r: 1 }, shadow: [8.5, 6.5],
   props: { page: { at: [0, 2.5, 3.2] }, hat: { at: [0, 5.05, 0] }, anten: { at: [0, 5.9, 0], spread: 1.5 } },
@@ -34,7 +34,7 @@ const crab = {
 /* ---- bunny: a round lilac blob with long ears */
 const bunnyFur = '#f3ecff', bunnyDome = '#ebe1fb', bunnyShade = '#e2d6f7', pink = '#ffb3cf', ink = '#2b2140';
 const bunny = {
-  id: 'bunny', name: 'Mochi bunny', scale: 0.85,
+  id: 'bunny', traits: ['docs', 'write', 'summarize', 'quick', 'web'], name: 'Mochi bunny', scale: 0.85,
   props: { page: { at: [0, 3.2, 3.4] } },
   bones: {
     body: { boxes: [b(5.6, 2.0, 4.6, 0, 1.7, 0, bunnyFur), b(3.0, 1.4, 0.2, 0, 1.5, 2.35, '#fff8fc')] },
@@ -59,7 +59,7 @@ const bunny = {
 /* ---- cat: a ginger loaf with a big head, pointed ears and a curled tail */
 const gin = '#f4a85c', stripe = '#d98a3d', cream = '#ffe6bf', cink = '#33261e';
 const cat = {
-  id: 'cat', name: 'Loaf cat', scale: 0.9,
+  id: 'cat', traits: ['explore', 'search', 'investigate', 'review', 'locate'], name: 'Loaf cat', scale: 0.9,
   props: { page: { at: [0, 2.8, 3.8] } },
   bones: {
     body: { boxes: [b(6.6, 3.0, 5.4, 0, 1.5, -0.5, gin), b(3.4, 1.6, 0.2, 0, 1.1, 2.25, cream),
@@ -89,7 +89,7 @@ const cat = {
 /* ---- mochi: a hamster-ish ball with a brown cap and pink cheeks */
 const mCream = '#fff1dc', mBrown = '#c98a55', mInk = '#2e2018', mPink = '#ffb0b8';
 const mochi = {
-  id: 'mochi', name: 'Mochi hamster', scale: 0.95,
+  id: 'mochi', traits: ['plan', 'architect', 'design', 'think', 'advisor'], name: 'Mochi hamster', scale: 0.95,
   props: { page: { at: [0, 2.6, 3.4] } },
   bones: {
     body: { boxes: [b(5.4, 1.8, 4.6, 0, 1.5, 0, mCream)] },
@@ -114,7 +114,7 @@ const mochi = {
 /* ---- robot: a little steel box with LED eyes and an antenna */
 const steel = '#9db7d5', dark = '#2a3447', led = '#5df2ff';
 const robot = {
-  id: 'robot', name: 'Boxbot', scale: 0.78, travel: 0.7,
+  id: 'robot', traits: ['code', 'build', 'fix', 'test', 'implement'], name: 'Boxbot', scale: 0.78, travel: 0.7,
   props: { page: { at: [0, 2.6, 3.0] }, anten: { at: [0, 7.2, 0], spread: 1.0 } },
   bones: {
     body: { boxes: [b(4.8, 2.8, 3.6, 0, 2.4, 0, steel), b(3.0, 1.5, 0.2, 0, 2.5, 1.85, dark),
