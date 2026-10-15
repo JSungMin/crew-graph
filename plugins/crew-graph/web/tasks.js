@@ -107,14 +107,15 @@ const FOODS = {
 const BUILTIN_FOOD = { crab: 'fish', bunny: 'carrot', cat: 'treat', mochi: 'seed', robot: 'battery' };
 // what each built-in does with its food while it works; any other character just fidgets
 const MOTION_OF = { crab: 'snip', bunny: 'nibble', cat: 'paw', mochi: 'roll', robot: 'hammer' };
-/* the food a character gets: its pack's own (a built-in id or boxes), else the built-in's, else a paper ticket; `setting`: 'character' | 'ticket'
+/* the food a character gets: its pack's own (a built-in id or boxes), else the built-in's, else the sunflower seed for a user's pack (a GLB
+   has no food of its own); a paper ticket only when nobody holds it (no character) or `setting` says so: 'character' | 'ticket'
    -> { key, boxes, crumb } */
 function foodFor(charId, def, setting) {
   if (setting === 'ticket') return { key: 'ticket', boxes: FOODS.ticket.boxes, crumb: FOODS.ticket.crumb };
   const f = def && def.food;
   if (f && f.boxes && f.boxes.length) return { key: 'own:' + charId, boxes: f.boxes, crumb: f.boxes[0].color === '@base' ? '#dddddd' : f.boxes[0].color };
   if (f && f.id && FOODS[f.id]) return { key: f.id, boxes: FOODS[f.id].boxes, crumb: FOODS[f.id].crumb };
-  const id = BUILTIN_FOOD[charId] || 'ticket';
+  const id = BUILTIN_FOOD[charId] || (charId ? 'seed' : 'ticket');
   return { key: id, boxes: FOODS[id].boxes, crumb: FOODS[id].crumb };
 }
 

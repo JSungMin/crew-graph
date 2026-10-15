@@ -12,6 +12,8 @@ export type MenuItem = {
 }
 export type PetSettingsLike = { types: Record<string, string>; agents: Record<string, string> }
 export type CharChoice = { id: string; name?: string }
+export type PackRef = { id: string; level: 'error' | 'warn'; n: number }
+export function packLabel(pack: PackRef | null | undefined): string
 
 export type AgentLike = { id?: string; status?: string }
 export function agentAction(agent: AgentLike | null | undefined): '' | 'dismiss' | 'stop'
@@ -19,10 +21,10 @@ export function finishedIds(agents: AgentLike[] | null | undefined): string[]
 export function currentValue(settings: PetSettingsLike, agentKey: string, typeKey: string): { value: string; own: boolean }
 export function characterItems(a: { chars: CharChoice[]; value: string; pick: (v: string) => void }): MenuItem[]
 export function crabItems(a: {
-  ctx: { id: string; type?: string; cur?: string; chars?: CharChoice[] }
+  ctx: { id: string; type?: string; cur?: string; chars?: CharChoice[]; pack?: PackRef | null }
   settings: PetSettingsLike
   session: string
-  act: { set: (patch: unknown) => void; focus: () => void; ask?: () => void; dismiss?: () => void; stop?: () => void }
+  act: { set: (patch: unknown) => void; focus: () => void; ask?: () => void; dismiss?: () => void; stop?: () => void; packs?: (id: string) => void }
   agentKeyOf: (session: string, id: string) => string
   canAsk?: boolean
   action?: '' | 'dismiss' | 'stop'

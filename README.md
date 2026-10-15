@@ -84,7 +84,7 @@ Pick them in the pet's **Settings…**, or with the `characters` option:
 main=crab, Explore=cat, *=auto
 ```
 
-`auto` matches each agent's role to a character; `random` gives each agent a stable random one. Bring your own as voxel JSON or GLB in `~/.claude/crew-graph/characters/` — see the [guide](docs/guide.md#characters).
+`auto` matches each agent's role to a character; `random` gives each agent a stable random one. Bring your own as voxel JSON or GLB in `~/.claude/crew-graph/characters/` — see the [guide](docs/guide.md#characters). A pack that is wrong or misses something gets a red or amber `!` badge, listed with how to fix it in **Settings…** and in `/crew characters` ([pack problems](docs/guide.md#pack-problems)).
 
 ## ⌨️ Commands
 

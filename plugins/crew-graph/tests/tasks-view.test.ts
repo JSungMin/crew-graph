@@ -27,11 +27,11 @@ type View = {
   tableSlot(i: number): { x: number; z: number }
   cardLines(d: Item, owner: string, blocked: boolean): [string, string][]
   foodFor(charId: string, def: unknown, setting: string): { key: string; boxes: { color: string }[]; crumb: string }
-  FOODS: Record<string, { boxes: { size: number[]; at: number[]; color: string }[] }>
+  FOODS: Record<string, { crumb: string; boxes: { size: number[]; at: number[]; color: string }[] }>
   BUILTIN_FOOD: Record<string, string>
   MOTION_OF: Record<string, string>
 }
-type Core = { normalizeDef(d: unknown): { def: null | { food?: { id?: string; boxes?: unknown[] } }; warnings: string[] } }
+type Core = { normalizeDef(d: unknown): { def: null | { food?: { id?: string; boxes?: unknown[] } }; warnings: string[] }; FOOD_IDS: string[]; DEFAULT_FOOD: string }
 const view = (globalThis as unknown as { CrewTasks: View }).CrewTasks
 const core = (globalThis as unknown as { CrewCharCore: Core }).CrewCharCore
 const builtin = (globalThis as unknown as { __crewCharacters: { id: string }[] }).__crewCharacters
@@ -128,14 +128,37 @@ test('the hover card says the title, the state, who has it and what it is doing 
 
 // ---------------------------------------------------------------- the food
 
-test('each built-in has its own food, anyone else a paper ticket, and the setting can ask for tickets', () => {
+test('each built-in has its own food, a user pack the sunflower seed, and the setting can ask for tickets', () => {
   expect(view.BUILTIN_FOOD).toEqual({ crab: 'fish', bunny: 'carrot', cat: 'treat', mochi: 'seed', robot: 'battery' })
   for (const c of builtin) if (c.id in view.BUILTIN_FOOD) expect(view.foodFor(c.id, undefined, 'character').key).toBe(view.BUILTIN_FOOD[c.id])
   expect(builtin.map(c => c.id).filter(id => !(id in view.BUILTIN_FOOD))).toEqual([]) // a new built-in needs a food
-  expect(view.foodFor('someone', undefined, 'character').key).toBe('ticket')
+  // a user's pack (JSON without a food, or a GLB, which has no def at all) eats the seed, as the hamster does; nobody holding it is a ticket
+  expect(view.foodFor('someone', undefined, 'character').key).toBe('seed')
+  expect(view.foodFor('someone', undefined, 'character').boxes).toBe(view.FOODS.seed?.boxes)
+  expect(view.foodFor('', undefined, 'character').key).toBe('ticket')
+  expect(view.foodFor('someone', undefined, 'ticket').key).toBe('ticket') // the setting still wins for everyone
   expect(view.foodFor('crab', undefined, 'ticket').key).toBe('ticket')
   expect(Object.keys(view.MOTION_OF).sort()).toEqual(Object.keys(view.BUILTIN_FOOD).sort())
   for (const f of Object.values(view.FOODS)) for (const b of f.boxes) expect(b.color).toMatch(/^#[0-9a-f]{6}$/i)
+})
+
+test('a user pack without a valid food eats the seed: no food, a bad food, a GLB; built-ins keep theirs; the ticket setting wins', () => {
+  const base = { id: 'puff', bones: { body: { boxes: [{ size: [4, 2, 3], at: [0, 1, 0], color: '#aabbcc' }] } } }
+  const none = core.normalizeDef(base)
+  expect(view.foodFor('puff', none.def, 'character').key).toBe('seed')
+  expect(view.foodFor('puff', none.def, 'character').crumb).toBe(view.FOODS.seed?.crumb)
+  for (const food of ['steak!', 7, true, { boxes: [] }, [], 'banana']) {
+    const r = core.normalizeDef({ ...base, food })
+    expect(r.def?.food).toBeUndefined()
+    expect(view.foodFor('puff', r.def, 'character').key).toBe('seed')
+  }
+  expect(view.foodFor('puff', undefined, 'character').key).toBe('seed') // a GLB has no def
+  expect(view.foodFor('puff', none.def, 'ticket').key).toBe('ticket')
+  expect(view.foodFor('robot', undefined, 'character').key).toBe('battery')
+  expect(view.foodFor('crab', undefined, 'character').key).toBe('fish')
+  // the foods a pack may name are the foods there are
+  expect([...core.FOOD_IDS].sort()).toEqual(Object.keys(view.FOODS).sort())
+  expect(core.DEFAULT_FOOD).toBe('seed')
 })
 
 test('a pack may name a built-in food or bring boxes; a bad food is ignored', () => {
@@ -153,7 +176,11 @@ test('a pack may name a built-in food or bring boxes; a bad food is ignored', ()
   expect(bad.def?.food).toBeUndefined()
   expect(bad.warnings.some(w => w.includes('food'))).toBe(true)
   expect(core.normalizeDef({ ...base, food: { boxes: [] } }).def?.food).toBeUndefined()
-  expect(view.foodFor('mine', core.normalizeDef({ ...base, food: 'nothing-like-it' }).def, 'character').key).toBe('ticket') // an id nobody knows
+  // an id that is not a built-in food is dropped with a warning, and the pack eats the seed
+  const unknown = core.normalizeDef({ ...base, food: 'nothing-like-it' })
+  expect(unknown.def?.food).toBeUndefined()
+  expect(unknown.warnings.some(w => w.includes('food'))).toBe(true)
+  expect(view.foodFor('mine', unknown.def, 'character').key).toBe('seed')
   const many = core.normalizeDef({ ...base, food: Array.from({ length: 90 }, () => bone.boxes[0]) })
   expect(many.def?.food?.boxes?.length).toBe(40)
 })

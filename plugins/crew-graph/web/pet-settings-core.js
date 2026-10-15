@@ -8,7 +8,8 @@
      "default": null | "auto" | "random" | "<character id>",   // for agents nothing else decided; null: the mod option, else the crab
      "types":  { "<agent type | main | architect | prefix* | *>": "<character id | random | auto>" },
      "agents": { "<session id>|<agent id>": "<character id | random | auto>" },
-     "show": { "bubbles": true, "ticker": true, "papers": true, "nameplate": true, "tasks": true },
+     "show": { "bubbles": true, "ticker": true, "papers": true, "nameplate": true, "tasks": true, "packWarnings": true },
+                                                         // packWarnings: the amber badge on a character whose pack only has warnings (a red one always shows)
      "food": "character" | "ticket",                      // the tasks agents work on and eat: each character's own food, or paper tickets
      "reduceMotion": false, "alwaysOnTop": true, "opacity": 100, "size": "" | "S" | "M" | "L",
      "autoDismiss": 0 | 5 | 10 | 30    // minutes after which the mod dismisses a finished agent from the pet and the Crew pane; 0: never
@@ -26,11 +27,11 @@
 const SIZES = { S: { width: 260, height: 220 }, M: { width: 360, height: 300 }, L: { width: 520, height: 430 } };
 const OPACITY_MIN = 60, MAX_TYPES = 64, MAX_AGENTS = 200;
 const AUTO_DISMISS = [0, 5, 10, 30];
-const SHOW_KEYS = ['bubbles', 'ticker', 'papers', 'nameplate', 'tasks'];
+const SHOW_KEYS = ['bubbles', 'ticker', 'papers', 'nameplate', 'tasks', 'packWarnings'];
 const FOODS = ['character', 'ticket'];
 const UNSAFE_KEYS = ['__proto__', 'constructor', 'prototype'];
 
-const defaults = () => ({ v: 1, default: null, types: {}, agents: {}, show: { bubbles: true, ticker: true, papers: true, nameplate: true, tasks: true }, food: 'character', reduceMotion: false, alwaysOnTop: true, opacity: 100, size: '', autoDismiss: 0 });
+const defaults = () => ({ v: 1, default: null, types: {}, agents: {}, show: { bubbles: true, ticker: true, papers: true, nameplate: true, tasks: true, packWarnings: true }, food: 'character', reduceMotion: false, alwaysOnTop: true, opacity: 100, size: '', autoDismiss: 0 });
 /* a value a rule may have: a character id (the form only; a pack that is not loaded is not an error), `random` or `auto` */
 const okValue = (v) => typeof v === 'string' && CC.CHAR_ID.test(v);
 const okKey = (k) => typeof k === 'string' && k.length >= 1 && k.length <= 200 && !/[\u0000-\u001f]/.test(k) && UNSAFE_KEYS.indexOf(k) < 0;
@@ -88,6 +89,12 @@ function merge(cur, patch) {
    agent { id, type, description, verb, isArchitect, parentId }; ctx { ids: every character id, auto: agent -> { id, why } | null, session }.
    -> { id, how, mode, why }: how = 'agent' | 'type:<key>' | 'option' | 'default' | 'legacy', mode = 'set' | 'random' | 'auto'. */
 function resolve(s, modRules, agent, ctx) {
+  const probe = { miss: null };
+  const r = resolveWith(s, modRules, agent, ctx, probe);
+  if (r && probe.miss !== null) r.miss = probe.miss; // the first character a matching rule asked for that is not loaded (a pack that failed): the page can say which
+  return r;
+}
+function resolveWith(s, modRules, agent, ctx, probe) {
   const ids = ctx.ids;
   if (!ids.length) return null;
   const lc = (x) => String(x).toLowerCase();
@@ -100,6 +107,7 @@ function resolve(s, modRules, agent, ctx) {
       return a && a.id ? { id: a.id, how, mode: 'auto', why: a.why || [] } : { id: randomId(), how, mode: 'random', why: null };
     }
     const f = find(v);
+    if (!f && probe.miss === null) probe.miss = v;
     return f ? { id: f, how, mode: 'set', why: null } : null;
   };
   const own = s.agents[agentKey(ctx.session, agent && agent.id)];

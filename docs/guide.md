@@ -150,7 +150,8 @@ The `petOnStart` option starts the pet when a session starts.
 Right-click anything and choose **Settings…**, or use the tray icon. It opens one small window (shared by all sessions; dark and rounded like the cards) whose changes apply to every pet window at once:
 
 - **Characters.** A *default for all agents* (a character, **Match role (auto)**, **Random**, or follow the `characters` option), each character as a tile with a live 3D preview (the same character code, idling; your own characters appear too), a character per *agent type* (the types seen in your sessions, `main`, and `*` for any other type) and one for a single *agent*. The right-click menu on a character sets the same things. When a character changes, the old one spins away, a puff of smoke, and the new one pops in.
-- **Show.** Speech bubbles, the activity ticker, file papers, the nameplate and the tasks, each on or off. **Food** gives the tasks as each character's own food (the default) or as paper tickets.
+- **Character packs.** Every file of your characters folder with its status (ok, warnings or error) and each problem with what to change, plus a **Rescan** button (the same as `/crew characters reload`; it asks the mod of a connected session, so it needs a pet window of one). A tile of a character whose pack has problems wears a red or amber `!`; click the tile or the badge to see them under the tiles. The right-click menu of such a character has **Pack problems…**, which opens Settings at that pack. See [Pack problems](#pack-problems).
+- **Show.** Speech bubbles, the activity ticker, file papers, the nameplate, the tasks and pack warnings, each on or off (*Pack warnings* off hides the amber badges on the characters; a red one always shows). **Food** gives the tasks as each character's own food (the default) or as paper tickets.
 - **Motion.** *Reduce motion* turns off the idle shuffles, drops the particle bursts and caps the frame rate lower (about 15 busy, 6 idle).
 - **Agents.** *Auto-dismiss finished agents* after 5, 10 or 30 minutes, or off.
 - **Window.** Always on top, opacity (60 to 100 %), a size preset S, M or L (besides dragging the grip), and **Reset to defaults**.
@@ -161,7 +162,7 @@ The pet keeps these in `~/.claude/crew-graph/overlay/pet-settings.json`; only th
 
 ```json
 { "default": "auto", "types": { "Explore": "cat", "*": "auto" }, "agents": { "<session id>|<agent id>": "robot" },
-  "show": { "bubbles": true, "ticker": true, "papers": true, "nameplate": true, "tasks": true }, "food": "character",
+  "show": { "bubbles": true, "ticker": true, "papers": true, "nameplate": true, "tasks": true, "packWarnings": true }, "food": "character",
   "reduceMotion": false, "alwaysOnTop": true, "opacity": 100, "size": "M", "autoDismiss": 0 }
 ```
 
@@ -194,7 +195,7 @@ The agent is the one the call's `agentId` names (main when it has none), the sam
 
 Hover an item for a card: its title, state, owner and what it is doing now.
 
-**Food.** One kind per character: the crab a fish, the bunny a carrot, the cat a treat stick, the hamster (`mochi`) a sunflower seed, the robot a battery, anyone else a paper ticket. A voxel pack picks its own with a `food` key: the id of a built-in food (`fish`, `carrot`, `treat`, `seed`, `battery`, `ticket`), or boxes like a bone (`"food": { "boxes": [...] }`: up to 40, centred on 0, about 2.5 voxels long with the long side along x). In the pet's Settings, **Food** switches every character to paper tickets.
+**Food.** One kind per character: the crab a fish, the bunny a carrot, the cat a treat stick, the hamster (`mochi`) a sunflower seed, the robot a battery, and your own characters (voxel packs and models) a sunflower seed, the hamster's; a paper ticket only when nobody holds the task. A voxel pack picks its own with a `food` key: the id of a built-in food (`fish`, `carrot`, `treat`, `seed`, `battery`, `ticket`), or boxes like a bone (`"food": { "boxes": [...] }`: up to 40, centred on 0, about 2.5 voxels long with the long side along x). A pack without a valid `food` gets the seed; an invalid one (an id that is not a built-in food, a list with no box) is reported as a pack problem. A `.glb` has no `food` and always eats the seed. In the pet's Settings, **Food** switches every character to paper tickets.
 
 **Only what happens while you watch is played.** The page compares each snapshot with the last by task id. The first snapshot after a start, a reload or a switch of session is the baseline: what is done stays eaten and its count shows at once, and nothing is eaten again. A task that arrives already done (the mod writes about twice a second, so two steps can land in one write) is eaten when it appears. The `✓ N` is the mod's count of tasks finished this session (it does not shrink when old ones fall out of the list), and a reload shows it at once.
 
@@ -233,7 +234,7 @@ main=crab, Explore=bunny, sonnet-coder=robot, architect=mochi, *=auto
 
 **Match role (`auto`).** A character can declare `traits`, role words. An agent's role is read from its type (`Explore`, `Plan`, `sonnet-coder`, `code-reviewer`, `general-purpose`, `architect`, ...), the words of its task text and the verb it is doing (many edits and runs mean code; reads and searches mean explore), with a small fixed table of keywords and weights. `auto` takes the character whose traits overlap the role most; ties go to a stable hash of the agent id. Siblings are spread: a character that a sibling already took costs a little, so equally good alternatives share the work. An agent keeps the character it was first given for as long as the pet window lives, whatever its verb does later. Words that count: `lead main generalist code build fix test implement run explore search investigate locate review docs write summarize quick web plan architect design think advisor`; other words are fine, they never match. The hover card says why (`robot · matched: code, test`).
 
-`/crew characters` lists the built-in and your characters with their traits, what was wrong with a file, how the current option reads, what the pet's Settings say about characters, and what `auto` would pick for the agents of the latest snapshot. `/crew characters reload` rescans your folder; a running pet or browser view picks the change up within a few seconds. `?demo=lineup` shows every character in a row (`&verbs=think,edit,run` picks the rows).
+`/crew characters` lists the built-in and your characters with their traits, what is wrong with each file and how to fix it ([Pack problems](#pack-problems)), how the current option reads, what the pet's Settings say about characters, and what `auto` would pick for the agents of the latest snapshot. `/crew characters reload` rescans your folder; a running pet or browser view picks the change up within a few seconds. `?demo=lineup` shows every character in a row (`&verbs=think,edit,run` picks the rows).
 
 **Your own characters** go in `~/.claude/crew-graph/characters/`. The mod creates the folder, with a `README.txt` that repeats the format below, when the viewer starts (`/crew web`, `/crew pet`) or on `/crew characters reload`. A page on `file://` cannot list a folder, so the mod scans it and writes `characters-user.js` next to the viewer.
 
@@ -264,6 +265,30 @@ main=crab, Explore=bunny, sonnet-coder=robot, architect=mochi, *=auto
   - `node tools/make-test-glb.mjs out.glb` (run it from a checkout of this repository; the installed plugin does not carry `tools/`) writes a small test model (a made-up "puff") with a rig-named skeleton, for trying the path.
 
 Characters you load are yours: the repository ships only the five original ones above.
+
+### Pack problems
+
+A file that is wrong, or misses something, is not silently ignored. Each pack gets a list of problems, `{ level, code, text, fix }`, worst first: an **error** means the character is not drawn as the pack meant (a crab stands in, nothing is drawn, or the food is not the one it names), a **warning** means it works but misses something.
+
+| Code | Level | What it says |
+| --- | --- | --- |
+| `unreadable`, `bad-json`, `too-big`, `no-bones` | error | The file cannot be read, is not valid JSON, is over 512 KiB (or the manifest limit of 3 MiB), or has no `bones` object: it does not load at all |
+| `nothing-drawn` | error | No box is left to draw (all dropped or none given): the character is invisible |
+| `food-bad` | error | `food` is not a built-in food or a list of boxes: the pack eats the seed |
+| `glb-failed`, `glb-too-big`, `glb-empty` | error | A model failed to load, is over 4 MiB where the page cannot read the folder, or has no geometry: a crab is drawn (found by the page) |
+| `food-none` | warning | No `food`: it eats the seed |
+| `no-hands`, `no-mouth` | warning | No `handL`/`handR`, no `mouth` (also checked for a model's node names): items are held at the arm, it eats at the head |
+| `no-traits` | warning | No `traits`: `auto` never picks it by role (not checked for a `.glb`, which cannot declare any) |
+| `bone-unknown`, `mirror-missing`, `box-color`, `box-limit` | warning | Dropped by validation: a bone that is not on the rig, a `mirror` of a bone that is not defined, boxes without a `#rrggbb` color (drawn light grey), more than 400 boxes |
+| `glb-large`, `glb-unread`, `glb-no-rig` | warning | A model over 4 MiB (not embedded), one the mod could not read, one with no node named like a rig bone |
+
+Where they show:
+
+- **On the character.** A small round `!` chip at the head's upper right, red for an error and amber for warnings only (the pet setting `show.packWarnings`, on by default, hides the amber ones; a red one always shows). Hovering the character adds a *Pack problems* section to its card: the first three problems and `+N more · Settings…`; in `/crew web` they are in the tooltip and the side card (with the fixes). A character that stands in for a pack that failed (a crab for a model that did not load, or for a file that is not valid JSON that a rule or the Settings asked for) wears the red chip and its card names the pack that failed.
+- **In the pet's Settings:** the *Character packs* section and the badges on the tiles (see above).
+- **`/crew characters`** prints the same problems grouped by pack, errors first, each with its fix.
+
+The mod writes them next to each pack in `characters-user.js` (`window.__crewUserPacks`, see the [data contract](DATA_CONTRACT.md#characters)); what only the page can know (a model that failed to load, its node names) it adds itself.
 
 ## Commands
 
