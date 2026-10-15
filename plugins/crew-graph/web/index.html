@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>crew-graph</title>
+<style>
+:root{
+  --bg:#12141c; --panel:rgba(20,23,34,.74); --line:rgba(255,255,255,.09);
+  --fg:#e6e9f2; --dim:#8b93a7; --ok:#5ee08a; --ask:#5aa9ff; --bad:#ff5c5c; --warn:#ffb84d;
+  --accent:#d97757;
+  --font:system-ui,"Segoe UI","Malgun Gothic","Apple SD Gothic Neo","Noto Sans KR",sans-serif;
+  --mono:ui-monospace,"Cascadia Mono",Consolas,"Malgun Gothic",monospace;
+}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);font:12px/1.4 var(--font);overflow:hidden}
+#stage{position:fixed;inset:0}
+#stage canvas{display:block;width:100%;height:100%;outline:none;touch-action:none}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:9px 11px;backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px)}
+.card h3{margin:0 0 6px;font-size:12px;font-weight:600;display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.dim{color:var(--dim)} .mono{font-family:var(--mono)}
+.dot{width:8px;height:8px;border-radius:50%;background:var(--dim);display:inline-block;flex:none}
+.dot.on{background:var(--ok);box-shadow:0 0 8px var(--ok)}
+#left,#right{position:fixed;top:12px;bottom:12px;display:flex;flex-direction:column;gap:8px;pointer-events:none;z-index:2}
+#left{left:12px;width:276px} #right{right:12px;width:310px}
+#left>*,#right>*{pointer-events:auto}
+.sp{flex:1;pointer-events:none!important;min-height:0}
+.row{display:flex;justify-content:space-between;gap:8px;margin:2px 0}
+.chip{background:rgba(255,255,255,.07);border-radius:999px;padding:0 7px;font-size:11px;color:var(--dim)}
+.bar{height:6px;border-radius:3px;background:rgba(255,255,255,.1);overflow:hidden;margin:3px 0 4px}
+.bar>i{display:block;height:100%;width:0;background:var(--ok);transition:width .4s,background .4s}
+#rates .rt{margin-top:5px}
+#gate{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;text-align:center}
+#gate div{border-radius:8px;padding:5px 0;background:rgba(255,255,255,.05)}
+#gate b{display:block;font-size:17px;font-family:var(--mono)}
+#gate span{font-size:10px;color:var(--dim);text-transform:uppercase;letter-spacing:.04em}
+#gate .a b{color:var(--ok)} #gate .q b{color:var(--ask)} #gate .d b{color:var(--bad)} #gate .p b{color:var(--warn)}
+#arch{margin-top:7px;color:var(--dim)}
+#logc{flex:1;min-height:0;display:flex;flex-direction:column;padding-bottom:4px}
+#log{overflow-y:auto;flex:1;min-height:0;margin-top:2px}
+#log::-webkit-scrollbar{width:6px} #log::-webkit-scrollbar-thumb{background:rgba(255,255,255,.15);border-radius:3px}
+.ev{display:flex;gap:6px;align-items:baseline;padding:2px 0;border-bottom:1px solid rgba(255,255,255,.04);font-size:11px}
+.ev.new{animation:flash 1.4s ease-out}
+@keyframes flash{from{background:rgba(255,255,255,.18)}to{background:transparent}}
+.ev .t{color:var(--dim);font-family:var(--mono);font-size:10px;flex:none}
+.ev i{width:7px;height:7px;border-radius:50%;flex:none;align-self:center}
+.ev b{flex:none;min-width:44px;font-weight:600}
+.ev .x{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#cfd4e4}
+#detail{display:none}
+#detail .st{padding:0 7px;border-radius:999px;font-size:10px;background:rgba(255,255,255,.1)}
+#detail .desc{margin:2px 0 6px;color:#cfd4e4;word-break:break-word}
+#detail .x{float:right;cursor:pointer;color:var(--dim)}
+#chip{position:fixed;left:50%;bottom:14px;transform:translateX(-50%);z-index:3;background:var(--panel);border:1px solid var(--line);border-radius:999px;padding:3px 14px;color:var(--dim);display:none}
+#tip{position:fixed;z-index:4;pointer-events:none;display:none;max-width:340px;background:rgba(10,12,18,.92);border:1px solid var(--line);border-radius:8px;padding:5px 8px;font-size:11px;word-break:break-all}
+#help{position:fixed;left:50%;top:10px;transform:translateX(-50%);color:var(--dim);font-size:10px;opacity:.55;pointer-events:none}
+@media (max-width:820px){#right{display:none}#left{width:230px}#help{display:none}}
+</style>
+</head>
+<body>
+<div id="stage"></div>
+
+<div id="left">
+  <section class="card" id="session">
+    <h3><span class="dot" id="sDot"></span><span id="sModel">waiting for data</span><span class="chip" id="sCwd" style="display:none"></span></h3>
+    <div class="row"><span class="dim">effort / mode</span><span id="sEffort">-</span></div>
+    <div class="row"><span class="dim">requests</span><span class="mono" id="sReq">0</span></div>
+    <div class="row"><span class="dim">context</span><span class="mono" id="sCtx">-</span></div>
+    <div class="bar"><i id="sBar"></i></div>
+    <div class="row"><span class="dim">compactions &#x27F2;</span><span class="mono" id="sComp">0</span></div>
+    <div class="row"><span class="dim">cost</span><span class="mono" id="sCost">-</span></div>
+    <div class="row"><span class="dim">ttft / speed</span><span class="mono" id="sSpeed">-</span></div>
+    <div id="rates"></div>
+  </section>
+  <section class="card" id="detail">
+    <h3><span id="dType">-</span><span class="st" id="dStatus">-</span><span class="x" id="dClose" title="close">&#x2715;</span></h3>
+    <div class="desc" id="dDesc"></div>
+    <div class="row"><span class="dim">doing</span><span class="mono" id="dVerb">-</span></div>
+    <div class="row"><span class="dim">steps / calls</span><span class="mono" id="dSteps">-</span></div>
+    <div class="row"><span class="dim">ctx / out tokens</span><span class="mono" id="dTok">-</span></div>
+    <div class="row"><span class="dim">elapsed</span><span class="mono" id="dTime">-</span></div>
+  </section>
+  <div class="sp"></div>
+  <section class="card" id="turn">
+    <h3><span class="dot" id="tDot"></span><span id="tTitle">turn</span></h3>
+    <div class="row"><span class="dim">duration</span><span class="mono" id="tDur">-</span></div>
+    <div class="row"><span class="dim">agents / edits / errors</span><span class="mono" id="tStats">-</span></div>
+  </section>
+</div>
+
+<div id="right">
+  <section class="card">
+    <div id="gate">
+      <div class="a"><b id="gA">0</b><span>allowed</span></div>
+      <div class="q"><b id="gQ">0</b><span>asked</span></div>
+      <div class="d"><b id="gD">0</b><span>denied</span></div>
+      <div class="p"><b id="gP">0</b><span>pending</span></div>
+    </div>
+    <div id="arch">architect consults: <b class="mono" id="aN">0</b> <span id="aState"></span></div>
+  </section>
+  <section class="card" id="logc">
+    <h3>events</h3>
+    <div id="log"></div>
+  </section>
+</div>
+
+<div id="chip"></div>
+<div id="tip"></div>
+<div id="help">drag: rotate &middot; right-drag: pan &middot; wheel: zoom &middot; click a crab for details</div>
+
+<script src="three.min.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
