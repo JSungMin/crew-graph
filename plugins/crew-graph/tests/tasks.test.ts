@@ -239,6 +239,8 @@ test('a stored book that is missing, old or damaged still reads', () => {
     todo: [],
     task: [{ id: 'task:1', src: 'todo', title: 't', status: 'pending', t: 0 }],
     turn: [],
+    mail: [],
+    assign: [],
     eaten: { main: 2 },
   })
   expect(bumpEaten(EMPTY_BOOK, 'a1').eaten).toEqual({ a1: 1 })

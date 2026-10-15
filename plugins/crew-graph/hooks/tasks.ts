@@ -1,10 +1,11 @@
 // crew-graph's task tracking: what the agents' to-do lists and tasks say, kept as plain data for the pet and the browser view.
-// Four sources become one list (docs/DATA_CONTRACT.md, `tasks`): TodoWrite (an agent's whole list, replaced on every call),
-// TaskCreate / TaskUpdate (one shared list, an owner per task), the subagent cards (a ticket owned by the child), and the prompt turns of
-// the main loop (proxy food, for a session whose model has no task tools). Nothing here touches `$`.
+// Six sources become one list (docs/DATA_CONTRACT.md, `tasks`): TodoWrite (an agent's whole list, replaced on every call),
+// TaskCreate / TaskUpdate (one shared list, an owner per task), the subagent cards (a ticket owned by the child), the prompt turns of
+// the main loop (proxy food, for a session whose model has no task tools), the letters that reach main (a teammate's report, a task
+// notification: the work queue), and the assignments main gives a teammate. Nothing here touches `$`.
 import type { AgentCard, Parents, TaskBook, TaskItem, TaskStatus } from '../types'
 import { clip } from './crew'
-import { redact } from './deck/core'
+import { promptLine, redact } from './deck/core'
 
 /** Cells of a title in the snapshot; the active text (activeForm) is a little shorter. */
 export const MAX_TITLE = 80
@@ -20,7 +21,7 @@ export const QUEUED_STALE_MS = 30 * 60_000
 /** What the stored state keeps per list, so a long session does not grow it without bound. */
 export const MAX_STORED = 200
 
-export const EMPTY_BOOK: TaskBook = { todo: [], task: [], turn: [], eaten: {} }
+export const EMPTY_BOOK: TaskBook = { todo: [], task: [], turn: [], mail: [], assign: [], eaten: {} }
 
 /** The tools whose calls are read (see noteTasks in register.tsx). */
 export const TASK_TOOLS = new Set(['TodoWrite', 'TaskCreate', 'TaskUpdate'])
@@ -45,12 +46,13 @@ export const taskText = (s: unknown, n: number) => clip(redact(str(s)).replace(/
 function normalizeItem(v: unknown): TaskItem | null {
   if (!isObject(v) || typeof v.id !== 'string' || typeof v.title !== 'string') return null
   const status = STATUSES.includes(str(v.status)) ? (v.status as TaskStatus) : 'pending'
-  const src = v.src === 'task' || v.src === 'agent' || v.src === 'turn' ? v.src : 'todo'
+  const src = v.src === 'task' || v.src === 'agent' || v.src === 'turn' || v.src === 'mail' || v.src === 'assign' ? v.src : 'todo'
   const item: TaskItem = { id: v.id, src, title: v.title, status, t: typeof v.t === 'number' ? v.t : 0 }
   if (typeof v.owner === 'string' && v.owner) item.owner = v.owner
   if (typeof v.active === 'string' && v.active) item.active = v.active
   if (Array.isArray(v.blockedBy)) item.blockedBy = v.blockedBy.filter((x): x is string => typeof x === 'string')
   if (typeof v.deliverTo === 'string' && v.deliverTo) item.deliverTo = v.deliverTo
+  if (typeof v.bound === 'string' && v.bound) item.bound = v.bound
   return item
 }
 
@@ -60,7 +62,7 @@ export function normalizeBook(stored: unknown): TaskBook {
   const list = (v: unknown) => (Array.isArray(v) ? v.map(normalizeItem).filter((x): x is TaskItem => x !== null) : [])
   const eaten: Record<string, number> = {}
   if (isObject(stored.eaten)) for (const [k, n] of Object.entries(stored.eaten)) if (typeof n === 'number' && n > 0) eaten[k] = Math.floor(n)
-  return { todo: list(stored.todo), task: list(stored.task), turn: list(stored.turn), eaten }
+  return { todo: list(stored.todo), task: list(stored.task), turn: list(stored.turn), mail: list(stored.mail), assign: list(stored.assign), eaten }
 }
 
 /** Deleted items older than the window go; each list keeps at most MAX_STORED (closed ones go first). */
@@ -77,7 +79,8 @@ export function pruneBook(book: TaskBook, now: number): TaskBook {
       return true
     })
   }
-  return { ...book, todo: keep(book.todo), task: keep(book.task), turn: keep(book.turn.filter(i => !(i.status === 'pending' && now - i.t > QUEUED_STALE_MS))) }
+  const unqueued = (list: TaskItem[]) => list.filter(i => !(i.status === 'pending' && now - i.t > QUEUED_STALE_MS))
+  return { ...book, todo: keep(book.todo), task: keep(book.task), turn: keep(unqueued(book.turn)), mail: keep(unqueued(book.mail)), assign: keep(book.assign) }
 }
 
 /** One more thing the agent `eater` has eaten (an id that turned into completed). */
@@ -231,6 +234,178 @@ export function applyTurnEnd(book: TaskBook, turnId: string, reason: string, now
   return pruneBook({ ...book, eaten, turn: book.turn.map(i => (i.id === id ? { ...i, status, t: now } : i)) }, now)
 }
 
+// ---------------------------------------------------------------- mail: what reaches main from a teammate, a task or another session
+
+/** The sender's name when nothing names it: what the origin kind says. */
+const MAIL_SENDER: Record<string, string> = {
+  'task-notification': 'task',
+  peer: 'peer',
+  'peer-send-message': 'peer',
+  coordinator: 'lead',
+  'projects-relay': 'relay',
+  channel: 'channel',
+}
+
+/** The frame the engine puts in front of another session's message. */
+const PEER_FRAME = /^\s*Another Claude session sent a message:?\s*/i
+
+/** One attribute of an opening tag (`<teammate-message teammate_id="..." summary="...">`). */
+const attr = (tag: string, name: string) => new RegExp(`\\b${name}="([^"]*)"`).exec(tag)?.[1] ?? ''
+
+/**
+ * Who a letter is from and what it says, from the text main receives and the origin kind the engine stamped. `teammate` is a sender the
+ * caller already knows (the mailbox's stamp, or the `session.send` that carried it); it wins over what the text says.
+ */
+export function mailParse(text: string, kind: string, teammate?: string): { from: string; summary: string } {
+  const open = /<teammate-message\b[^>]*>/i.exec(text)?.[0] ?? ''
+  const body =
+    text
+      .replace(PEER_FRAME, '')
+      .replace(/<[^>]*>/g, '\n')
+      .split('\n')
+      .map(l => l.trim())
+      .find(l => l.length > 0) ?? ''
+  const from = teammate?.trim() || attr(open, 'teammate_id') || attr(text.slice(0, 200), 'from') || MAIL_SENDER[kind] || 'someone'
+  return { from: taskText(from, 24), summary: taskText(attr(open, 'summary') || body, MAX_TITLE) }
+}
+
+/** The head of a message's text, whitespace folded and the peer frame dropped: what two sightings of one message are matched by. */
+export const mailKey = (text: string) => text.replace(PEER_FRAME, '').replace(/\s+/g, ' ').trim().slice(0, 60)
+
+/** Fallback only: does a turn's opening text read as the user's own words? (A leading `<tag>` or the peer frame is not.) The origin of the prompt decides when it was seen. */
+export const looksLikeUser = (text: string) => !PEER_FRAME.test(text) && promptLine(text).who === 'you' && !isProtocolText(text)
+
+/** A letter that reached main and has not opened a turn yet: its id and the key of its text. */
+export type MailWait = { mid: string; key: string; at: number }
+
+/** The waiting letter a main turn that starts with `text` was opened by: the one whose text it holds; else, for a turn that is not the user's, the oldest. */
+export function mailForTurn(waits: readonly MailWait[], text: string): MailWait | undefined {
+  const flat = text.replace(/\s+/g, ' ')
+  return waits.find(w => w.key !== '' && flat.includes(w.key)) ?? (looksLikeUser(text) ? undefined : waits[0])
+}
+
+/** Who sent a message, as an earlier sighting of it said (a `session.send` of a teammate, a `session.receive` stamp). */
+export type MailFrom = { key: string; from: string; at: number }
+export const MAIL_FROM_TTL_MS = 10 * 60_000
+export const MAIL_FROM_MAX = 40
+
+/** `log` with one more sighting; the old and the many are dropped. A message with no usable text leaves it as it was. */
+export function noteMailFrom(log: readonly MailFrom[], text: string, from: string, now: number): MailFrom[] {
+  const key = mailKey(text)
+  if (!key || !from) return [...log]
+  return [...log.filter(x => now - x.at <= MAIL_FROM_TTL_MS && x.key !== key), { key, from, at: now }].slice(-MAIL_FROM_MAX)
+}
+
+/** The sender an earlier sighting gave this text, if one did (the delivered text holds the sent text). */
+export function mailFromOf(log: readonly MailFrom[], text: string, now: number): string | undefined {
+  const flat = text.replace(/\s+/g, ' ')
+  return [...log].reverse().find(x => now - x.at <= MAIL_FROM_TTL_MS && flat.includes(x.key))?.from
+}
+
+/** An agent a message may be addressed to: its id, the name SendMessage knows it by, its address in the team (`<name>@<team>`). */
+export type Address = { id: string; name?: string; teammateId?: string }
+
+/** The agent id a recipient text names ("scout", "scout@team", "scout [ref]", an id), or null when it names no known agent (the lead, a session). */
+export function addresseeOf(to: string, known: readonly Address[]): string | null {
+  const t = to.trim().split(/\s+/)[0]?.toLowerCase() ?? ''
+  if (!t || t === 'main' || t === 'team-lead') return null
+  const hit = (a: Address) => a.id.toLowerCase() === t || a.name?.toLowerCase() === t || a.teammateId?.toLowerCase() === t || a.teammateId?.split('@')[0]?.toLowerCase() === t
+  return known.find(hit)?.id ?? null
+}
+
+/**
+ * A message that is a protocol object (a shutdown or plan answer, an idle notice: `{"type": "..."}`), not words: no letter, no job. It may
+ * arrive bare, after the peer frame, or inside the mailbox tag, so the frame and the tags are taken off before it is looked at.
+ */
+export const isProtocolText = (text: string) => /^\{\s*"type"\s*:\s*"[\w-]+"/.test(text.replace(PEER_FRAME, '').replace(/<[^>]*>/g, ' ').trim())
+
+/** A letter's title: "from <sender>: <summary>", cut to MAX_TITLE cells, credentials masked. */
+export const mailTitle = (from: string, summary: string) => taskText(summary ? `from ${from}: ${summary}` : `from ${from}`, MAX_TITLE)
+
+const mailItem = (mid: string, title: string, status: TaskStatus, now: number, bound?: string): TaskItem => {
+  const item: TaskItem = { id: `mail:${mid}`, src: 'mail', owner: 'main', title, status, t: now }
+  if (bound) item.bound = bound
+  return item
+}
+
+/** A letter reached main: pending on its plate. `bound`: the main turn it was delivered into (it reads it); absent when it opens the next turn. */
+export function applyMailIn(book: TaskBook, mid: string, title: string, now: number, bound?: string): TaskBook {
+  const id = `mail:${mid}`
+  return pruneBook({ ...book, mail: [...book.mail.filter(i => i.id !== id), mailItem(mid, title, 'pending', now, bound)] }, now)
+}
+
+/** The prompt was dropped (a hook refused it): the letter never reached main. */
+export function applyMailDrop(book: TaskBook, mid: string): TaskBook {
+  const id = `mail:${mid}`
+  return book.mail.some(i => i.id === id) ? { ...book, mail: book.mail.filter(i => i.id !== id) } : book
+}
+
+/**
+ * Main's turn `turnId` starts, opened by the letter `mid` or by anything else. The letter becomes the turn's work (in progress); a letter
+ * still in progress for an earlier turn lost its end (a reload, a missed event) and is closed as failed, so it cannot stay in hand.
+ */
+export function applyMailStart(book: TaskBook, turnId: string, now: number, mid?: string): TaskBook {
+  const id = mid ? `mail:${mid}` : ''
+  const stale = (i: TaskItem) => i.status === 'in_progress' && i.id !== id && i.bound !== turnId
+  if (!book.mail.some(i => i.id === id || stale(i))) return book
+  return pruneBook(
+    {
+      ...book,
+      mail: book.mail.map(i => (i.id === id ? { ...i, status: 'in_progress' as const, bound: turnId, t: now } : stale(i) ? { ...i, status: 'failed' as const, t: now } : i)),
+    },
+    now,
+  )
+}
+
+/** Main's turn `turnId` ended: every letter that turn read is eaten on `answer` (main's count goes up by one each), else it fails with the turn. */
+export function applyMailEnd(book: TaskBook, turnId: string, reason: string, now: number): TaskBook {
+  const mine = book.mail.filter(i => i.bound === turnId && isOpen(i.status))
+  if (mine.length === 0) return book
+  const status: TaskStatus = reason === 'answer' ? 'completed' : 'failed'
+  const eaten = status === 'completed' ? { ...book.eaten, main: (book.eaten.main ?? 0) + mine.length } : book.eaten
+  return pruneBook({ ...book, eaten, mail: book.mail.map(i => (mine.includes(i) ? { ...i, status, t: now } : i)) }, now)
+}
+
+// ---------------------------------------------------------------- assignments: what main gave a teammate to do
+
+/** What an assignment's title is: the message's own label when it has one, else its first words. */
+export const assignTitle = (summary: unknown, text: unknown) => {
+  const firstLine = str(text).split('\n').map(l => l.trim()).find(l => l.length > 0) ?? ''
+  return taskText(str(summary) || firstLine, MAX_TITLE) || 'assignment'
+}
+
+const assignNum = (id: string) => Number(id.slice(id.lastIndexOf(':') + 1)) || 0
+
+/**
+ * `agent` (a teammate) was given a job, by its spawn or by a message from `giver`. The teammate holds the oldest open one; the
+ * rest wait on its plate in the order they came. It is handed back to `giver` when the teammate reports (applyAssignDone), whatever the
+ * teammate's card says in between: a teammate's card flips between idle and completed with every message.
+ */
+export function applyAssign(book: TaskBook, agent: string, title: string, giver: string, now: number): TaskBook {
+  const mine = book.assign.filter(i => i.owner === agent)
+  const n = mine.reduce((m, i) => Math.max(m, assignNum(i.id)), 0) + 1
+  const status: TaskStatus = mine.some(i => isOpen(i.status)) ? 'pending' : 'in_progress'
+  const item: TaskItem = { id: `assign:${agent}:${n}`, src: 'assign', owner: agent, title, status, deliverTo: giver, t: now }
+  return pruneBook({ ...book, assign: [...book.assign, item] }, now)
+}
+
+/**
+ * `agent` reported back (`all` false: it sent its report; the oldest job is delivered and the next one is taken in hand) or went idle
+ * (`all` true, with how the turn ended: nothing is left in its hands). Delivered jobs are eaten by whoever gave them (the count goes up).
+ */
+export function applyAssignDone(book: TaskBook, agent: string, all: boolean, now: number, reason = 'answer'): TaskBook {
+  const open = book.assign.filter(i => i.owner === agent && isOpen(i.status))
+  const first = open.find(i => i.status === 'in_progress') ?? open[0]
+  if (!first) return book
+  const status: TaskStatus = reason === 'answer' ? 'completed' : 'failed'
+  const closing = all || status === 'failed' ? open : [first]
+  const next = !all && status === 'completed' ? open.find(i => !closing.includes(i)) : undefined
+  let eaten = book.eaten
+  if (status === 'completed') for (const i of closing) eaten = { ...eaten, [i.deliverTo ?? 'main']: (eaten[i.deliverTo ?? 'main'] ?? 0) + 1 }
+  const assign = book.assign.map(i => (closing.includes(i) ? { ...i, status, t: now } : i === next ? { ...i, status: 'in_progress' as const, t: now } : i))
+  return pruneBook({ ...book, eaten, assign }, now)
+}
+
 // ---------------------------------------------------------------- the snapshot's list
 
 /** A subagent card as a ticket owned by the child, to be handed to its parent when it is done. */
@@ -255,7 +430,10 @@ export function ticketOf(c: AgentCard, parents: Parents): TaskItem {
 export function tasksOf(book: TaskBook, cards: AgentCard[], parents: Parents, now: number, hidden?: ReadonlySet<string>): TaskItem[] {
   // the tickets first: a long to-do list must not push a subagent's ticket out of the cap
   const mine = (i: TaskItem) => !(hidden && i.owner !== undefined && hidden.has(i.owner))
-  const all = [...cards.map(c => ticketOf(c, parents)), ...book.todo, ...book.task, ...book.turn].filter(mine)
+  // a teammate's card flips between idle and completed with every message, so it is no ticket: its assignments are (applyAssign)
+  const tickets = cards.filter(c => !c.isTeammate).map(c => ticketOf(c, parents))
+  const letters = book.mail.map(({ bound: _bound, ...i }) => i)
+  const all = [...tickets, ...book.assign, ...letters, ...book.todo, ...book.task, ...book.turn].filter(mine)
   const open = all.filter(i => isOpen(i.status)).slice(0, MAX_OPEN)
   const closed = all
     .filter(i => i.status === 'completed' || i.status === 'failed')

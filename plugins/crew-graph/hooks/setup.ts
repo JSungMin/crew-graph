@@ -28,6 +28,14 @@ export const proxyFoodOn = (foodFrom: FoodFrom, native: boolean | null) => foodF
 /** A user prompt origin worth a plate: the user's own Enter, a Remote Control client, the owner's Slack ping. */
 export const USER_ORIGINS: readonly string[] = ['composer', 'bridge', 'slack-ping']
 
+/**
+ * A prompt origin that is a letter to main, not the user's words (PromptOrigin in the engine's types): a teammate's or another session's
+ * message, a background task's notification, a coordinating session's hand-off, a channel relay. `scheduled-trigger`, `sdk`,
+ * `auto-continuation` and the observer kinds are neither the user nor a report, so they are food for no one.
+ */
+export const MAIL_ORIGINS: readonly string[] = ['task-notification', 'peer', 'peer-send-message', 'coordinator', 'projects-relay', 'channel']
+export const isMailOrigin = (kind: unknown): boolean => typeof kind === 'string' && MAIL_ORIGINS.includes(kind)
+
 export const DOCS_URL = 'https://code.claude.com/docs/en/tools-reference#task-tool-availability'
 export const ENV_URL = 'https://code.claude.com/docs/en/env-vars'
 export const ENV_KEY = 'CLAUDE_CODE_ENABLE_TODO_TOOLS'
