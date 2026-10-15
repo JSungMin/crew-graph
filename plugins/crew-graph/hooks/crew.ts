@@ -208,3 +208,12 @@ export function snapshotOf(s: SnapshotInput) {
 }
 
 export const dataJs = (snapshot: unknown) => `window.__crewUpdate && window.__crewUpdate(${JSON.stringify(snapshot)});\n`
+
+/** The scrollbar column for a window of `bodyRows` at `offset` over `total` rows; null when it all fits. */
+export function scrollbar(offset: number, bodyRows: number, total: number): { top: number; thumbTop: number; thumbLen: number } | null {
+  if (bodyRows <= 0 || total <= bodyRows) return null
+  const top = Math.max(0, Math.min(offset, total - bodyRows))
+  const thumbLen = Math.max(1, Math.min(bodyRows, Math.round((bodyRows * bodyRows) / total)))
+  const thumbTop = Math.round((top * (bodyRows - thumbLen)) / (total - bodyRows))
+  return { top, thumbTop, thumbLen }
+}

@@ -170,6 +170,8 @@ declare module 'claude-code' {
       autoOpened: boolean
       web: Web
       view3d: View3d
+      /** How many rows the pane's tree has, as the engine last measured it; 0 until measured. */
+      paneRows: number
     }
   }
 }
