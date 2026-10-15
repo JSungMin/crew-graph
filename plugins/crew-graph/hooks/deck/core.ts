@@ -118,6 +118,9 @@ export type Config = {
   view3dRows: number
   view3dColumns: number
   view3dMode: 'auto' | 'cells' | 'image'
+  /** crew-graph: who is drawn as which character, as written: "main=crab, Explore=bunny, *=random". Empty: every agent is a crab. */
+  characters: string
+  characterRules: CharacterRule[]
 }
 
 const safeRegExp = (source: string, fallback: string) => {
@@ -126,6 +129,28 @@ const safeRegExp = (source: string, fallback: string) => {
   } catch {
     return new RegExp(fallback, 'i')
   }
+}
+
+/** One `who=character` rule of the `characters` option. `character` is a character id or `random` (a stable pick by hash of the agent id). */
+export type CharacterRule = [who: string, character: string]
+
+/**
+ * "main=crab, Explore=bunny; sonnet-coder=robot, *=random" -> [['main','crab'], ['Explore','bunny'], ['sonnet-coder','robot'], ['*','random']].
+ * Parts are split by `,` `;` or a line break; one without `=` or with an empty side is dropped; `auto` means `random`. The viewer
+ * (web/characters-core.js) reads the same text the same way; a test holds the two together.
+ */
+export const parseCharacterRules = (spec: unknown): CharacterRule[] => {
+  const out: CharacterRule[] = []
+  if (typeof spec !== 'string') return out
+  for (const part of spec.split(/[,;\n]+/)) {
+    const i = part.indexOf('=')
+    if (i < 1) continue
+    const who = part.slice(0, i).trim()
+    const ch = part.slice(i + 1).trim()
+    if (!who || !ch || who.length > 80 || ch.length > 80) continue
+    out.push([who, /^(random|auto)$/i.test(ch) ? 'random' : ch])
+  }
+  return out.slice(0, 64)
 }
 
 /** The plugin's `/config` values, read leniently: anything malformed falls back to the default. */
@@ -157,6 +182,8 @@ export const parseConfig = (o: Readonly<Record<string, unknown>>): Config => {
     view3dRows: typeof o.view3dRows === 'number' ? Math.min(60, Math.max(8, Math.round(o.view3dRows))) : 28,
     view3dColumns: typeof o.view3dColumns === 'number' ? Math.min(240, Math.max(40, Math.round(o.view3dColumns))) : 110,
     view3dMode: o.view3dMode === 'cells' || o.view3dMode === 'image' ? o.view3dMode : 'auto',
+    characters: str('characters', ''),
+    characterRules: parseCharacterRules(o.characters),
   }
 }
 

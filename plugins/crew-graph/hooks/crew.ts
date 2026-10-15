@@ -153,6 +153,8 @@ export type SnapshotInput = {
   parents: Parents
   turn: Turn
   receipt: Receipt | null
+  /** The `characters` option parsed ([who, character] pairs); left out of the snapshot when empty. */
+  chars?: [string, string][]
 }
 
 /** What the browser view reads (docs/DATA_CONTRACT.md, v1). */
@@ -228,6 +230,7 @@ export function snapshotOf(s: SnapshotInput) {
     files: s.files.map(f => withAbs(f, s.cwd)),
     events: s.events,
     gate: { allowed: g.rule, asked: g.cleared, denied: g.deny, pending: g.ask },
+    ...(s.chars && s.chars.length > 0 ? { chars: s.chars } : {}),
     architect: {
       consults: s.architect.consults.length,
       running: isAdvising(s.architect),

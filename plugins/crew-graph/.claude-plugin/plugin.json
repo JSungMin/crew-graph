@@ -1,6 +1,6 @@
 {
   "name": "crew-graph",
-  "version": "0.6.1",
+  "version": "0.7.0",
   "description": "Live agent dashboard with Clawd crabs: model vitals, permission gate, architect, subagent cards, the agent tree and plan/doc graph, and a three.js 3D view of agents interacting, in the pane (/crew 3d) or the browser (/crew web). Absorbs Flightdeck",
   "types": "./types/index.d.ts",
   "author": {
@@ -19,7 +19,8 @@
     "dashboard",
     "observability",
     "three.js",
-    "clawd"
+    "clawd",
+    "characters"
   ],
   "userConfig": {
     "architectPattern": {
@@ -137,6 +138,12 @@
       "description": "Columns the pane asks for when /crew 3d opens it (40-240)",
       "type": "number",
       "default": 110
+    },
+    "characters": {
+      "title": "Characters",
+      "description": "Who is drawn as which character: who=character pairs, e.g. main=crab, Explore=bunny, sonnet-coder=robot, *=random (who: an agent id or type, architect, or a prefix ending in *; character: crab, bunny, cat, mochi, robot, one of yours in ~/.claude/crew-graph/characters/, or random). Empty: every agent is a crab. /crew characters lists them",
+      "type": "string",
+      "default": ""
     },
     "view3dMode": {
       "title": "3D view drawing",

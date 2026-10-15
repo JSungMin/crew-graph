@@ -2,7 +2,7 @@
 // crew pet: the crew-graph view on the desktop, in transparent, frameless, always-on-top windows.
 //
 //   electron main.js --page <index.html> --state <dir> [--session <id>] [--orca]
-//   electron main.js ... --shot <png> [--demo [busy]] [--at x,y]     one picture, then exit
+//   electron main.js ... --shot <png> [--demo [busy|lineup]] [--chars "main=crab, *=random"] [--at x,y]     one picture, then exit
 //   electron main.js ... --selftest                                   exercises the resize path, prints bounds
 //
 // One process, one window per Claude session: a second start with another --session opens another window,
@@ -372,6 +372,9 @@ async function createWindow(id, orca) {
   if (!ticker) query.ticker = '0'
   if (startCollapsed) query.collapsed = '1'
   if (isDemo) Object.assign(query, { demo: demoMode, skip: '14', demoRoot: demoRoot().replace(/\\/g, '/') })
+  // Development flags: --chars "main=crab, *=random" picks the demo's characters; --hooks lets a driver script reach into the page (?hooks).
+  if (arg('chars')) query.chars = arg('chars')
+  if (has('hooks')) query.hooks = '1'
   await win.loadFile(pageFile, { query })
   win.showInactive()
   win.on('moved', saveState)

@@ -82,7 +82,7 @@ The three.js view runs inside the Crew pane, and you can touch it.
 
 This copies the viewer to `~/.claude/crew-graph/` and opens `index.html` in your browser (inside Orca, in an Orca browser tab via `orca tab create`). While work runs, the mod rewrites `data.js` there at most every 450 ms. The page reloads it by script-tag injection, so it works from `file://` with no server and no network.
 
-- Every agent is a voxel Clawd that poses like its terminal twin. Agents are laid out as a tree with main at the root. Pinch it by clicking it, and pet it by stroking it.
+- Every agent is a voxel Clawd (or another character, see [Characters](#characters)) that poses like its terminal twin. Agents are laid out as a tree with main at the root. Pinch it by clicking it, and pet it by stroking it.
 - A child hangs from its parent on one smooth tube in the child's colour; dashes run along it only while the child works, and a finished child's link is faint.
 - Plans, docs and code float in a small arc beside the agent that touched them last: five at most, with a `+N` chip for the rest. A file two agents share sits between them. There are no standing agent→file lines.
 - Every interaction is a particle: spawn travels parent→child, an answer child→parent, a read file→agent, a write agent→file, and a denial or failure is a red burst. A read or write also draws a short arc, blue for read and orange for write, that fades in about a second and a half.
@@ -110,9 +110,10 @@ Several sessions can run at once. Each session writes its own `~/.claude/crew-gr
 
 | You do | It does |
 | --- | --- |
-| Drag a crab (a pull of about 40 px, or hold it a moment first) or drag the name pill or any other part of the picture | Carries the window. The crab dangles, its legs swing and its body sways against the movement; set down, it squash-bounces. |
-| Click a crab | Pinch (as in the browser view) |
-| Scrub a crab: short strokes back and forth, with the button down or just hovering | Pet. Two turns of direction with the button down count as a stroke, and then the window stays put. |
+| Press a crab and pull (more than a few pixels), or drag the name pill or any other part of the picture | Carries the window, always. The crab dangles, its limbs swing and its body sways against the movement; set down, it squash-bounces. |
+| **Shake the window while carrying a crab** | It gets dizzy. Three or more direction reversals within 1.2 s, each fast enough, count as a shake; a hard shake looks different from a sway. While it lasts, the carried character flails (arms, legs, ears and tail follow through with lag, the other way from the motion), its eyes turn to spirals `@ @` and sweat drops and stars fly off. The other characters in the window are knocked about and the files rattle, then everything settles. Set down, it staggers for about 2 s with stars circling its head and then shakes it off; after a very hard shake it sits down first. |
+| Click a crab (press and release without moving) | Pinch (as in the browser view) |
+| Stroke a crab: short strokes back and forth with the button up (just hovering) | Pet |
 | Click (or double-click) a file paper | Opens it (inside Orca with `orca file open --focus`, else the system opens it; programs and scripts are shown in the folder instead of run) |
 | Click a `+N` chip | A list of the files folded behind it; click one to open it |
 | Shift+click a file | Shows it in the file manager |
@@ -131,6 +132,61 @@ Each working crab shows a small speech bubble with what it does (`✎ app.js`, `
 The tray icon (a crab) offers Show, Always on top, Activity ticker, Reset position & size, a list of the open sessions (Show, Close) and Quit. Window positions and sizes are kept per session in `~/.claude/crew-graph/overlay/overlay-state.json`.
 
 The `petOnStart` option starts the pet when a session starts.
+
+## Characters
+
+Every agent can be drawn as a different cute character. They all stand on one **shared skeleton**, so every animation (the work-verb poses, pinch, pet, the carry dangle and the shake, dozing, the hello wave, looking at the cursor) works for all of them: the animation sets bones by name and skips the ones a character does not have (a bunny has no middle legs, a crab no ears).
+
+| Id | Character |
+| --- | --- |
+| `crab` | Clawd, the default |
+| `bunny` | A round lilac blob with long ears |
+| `cat` | A ginger loaf with pointed ears and a curled tail |
+| `mochi` | A hamster-ish ball with a brown cap and pink cheeks |
+| `robot` | A little steel box with LED eyes and an antenna |
+
+The built-in characters are original designs. Without the `characters` option every agent is a crab, exactly as before.
+
+**Who is who.** The `characters` option is a list of `who=character` pairs:
+
+```text
+main=crab, Explore=bunny, sonnet-coder=robot, architect=mochi, *=random
+```
+
+- `who` is an agent id or type (case does not matter), `architect`, or a prefix ending in `*`; the first pair that matches wins.
+- `character` is a built-in id, one of yours (below), or `random`.
+- An agent no pair matches gets a **stable pick** by hash of its id among all available characters, yours included, so it keeps its look. A name that no character has (a pack that is not there) shows a crab.
+- With the option empty, everyone is a crab.
+
+`/crew characters` lists the built-in and your characters, what was wrong with a file, and how the current option reads. `/crew characters reload` rescans your folder; a running pet or browser view picks the change up within a few seconds. `?demo=lineup` shows every character in a row (`&verbs=think,edit,run` picks the rows).
+
+**Your own characters** go in `~/.claude/crew-graph/characters/`. The mod creates the folder, with a `README.txt` that repeats the format below, when the viewer starts (`/crew web`, `/crew pet`) or on `/crew characters reload`. A page on `file://` cannot list a folder, so the mod scans it and writes `characters-user.js` next to the viewer.
+
+- **`*.json`: a voxel character.** Boxes on the named rig; small and editable by hand:
+
+  ```json
+  {
+    "id": "mybot", "name": "My bot", "scale": 1,
+    "bones": {
+      "body":  { "boxes": [ { "size": [5,3,4], "at": [0,2,0], "color": "#88aaff" } ] },
+      "head":  { "at": [0,3.5,0], "boxes": [ { "size": [4,3,4], "at": [0,1.5,0], "color": "#99bbff" } ] },
+      "eyeL":  { "parent": "head", "at": [-1,1.6,2.1], "boxes": [ { "size": [0.8,1,0.3], "at": [0,0,0], "color": "#10131c" } ] },
+      "eyeR":  { "mirror": "eyeL" },
+      "armL":  { "at": [-2.8,2.5,0], "boxes": [ { "size": [1.4,1,1], "at": [-0.7,0,0], "color": "#88aaff" } ] },
+      "armR":  { "mirror": "armL" },
+      "legL1": { "at": [-1.2,0.5,0], "gait": 0, "boxes": [ { "size": [1.2,1,1.4], "at": [0,0,0], "color": "#5570c0" } ] },
+      "legR1": { "mirror": "legL1", "gait": 2 }
+    }
+  }
+  ```
+
+  The rig is `root body head earL earR eyeL eyeR mouth armL handL armR handR legL1 legL2 legL3 legR1 legR2 legR3 tail`; every bone is optional. Units are voxels of the crab (7 wide); x is right, y up, z toward the viewer. A bone's `at` is relative to its `parent` (default `body`) and it turns about its own origin, so put the origin where it should bend. `mirror` copies another bone with x flipped. A box is `{ size, at, color }`, with optional `rot` (radians), `unlit` (an LED) and `fixed` (not tinted when the agent fails or is done). Optional top-level keys: `scale`, `base` (`{ h, s, l, spread }`, the `@base` colour, hue-shifted a little per agent type), `eyes` (boxes per expression for the left eye: `x`, `squint`, `happy`, `sleepy`, `dizzy`; the right eye is mirrored, missing ones are generated), `props` (where the reading page, the architect's hat and the web antenna sit), `hit`, `shadow`, `travel`.
+
+- **`*.glb`: a skinned model.** A glTF binary whose bones (nodes) are named like the rig. Case and `_` `.` space `-` do not matter: `Head`, `arm_L`, `Arm.R`, `mixamorig:Head`, `left arm` and `L_Leg` all match. The viewer turns the bones relative to the model's own rest pose (whatever their local axes), bobs, leans and squashes the model as a whole, scales it to the crab's footprint (about 7 wide and 6.5 tall) and stands it on the ground facing +z (a model whose eyes are at its back is turned around). Extra nodes named `eyeL_happy`, `eyeL_x`, `eyeL_squint`, `eyeL_sleepy`, `eyeL_dizzy` (and `eyeR_...`), placed beside the eye bones, are shown instead of the eye for that expression; without them the eyes just blink shut. Draco, Meshopt and KTX2 are not supported.
+  - **How the bytes get to the page.** Files up to 4 MiB (the most the mod's `fs.read` can hand over) are embedded as base64 script parts in `characters-glb/`, which works everywhere, in a browser on `file://` and in the pet. A larger file is read from the folder by the page itself: the pet (Electron) can do that, a browser on `file://` usually refuses unless it runs with file access, and then the character falls back to a crab and the console says why.
+  - `node tools/make-test-glb.mjs out.glb` (run it from a checkout of this repository; the installed plugin does not carry `tools/`) writes a small test model (a made-up "puff") with a rig-named skeleton, for trying the path.
+
+Characters you load are yours: the repository ships only the five original ones above.
 
 ## Install
 
@@ -155,6 +211,7 @@ If you also have Flightdeck installed, turn it off. crew-graph includes all of i
 | `/crew web [noopen\|off]` | The 3D browser view. |
 | `/crew pet` | The desktop pet: the crabs in a transparent always-on-top window, one window per session. |
 | `/crew pet off [all]` | Close this session's pet window, or (`all`) quit the pet. |
+| `/crew characters [reload]` | List the built-in characters, yours and the current assignment; `reload` rescans `~/.claude/crew-graph/characters/`. |
 
 Focus the pane with `ctrl+x tab`:
 - `1`…`6` expand an agent card.
@@ -164,14 +221,15 @@ Focus the pane with `ctrl+x tab`:
 
 All of Flightdeck's options apply. Set them in `/config` or under `pluginConfigs["crew-graph"].options`:
 - `architectPattern`, `architectLabel`, `gateLabel`, `panels`, `motion`, `moments`, `matchDescriptions`, `maxCards`, `layout`, `palette`, `openOnStart`, `statusLine`
-- `webOnStart`, `petOnStart`, `view3dFps`, `view3dRows`, `view3dColumns` and `view3dMode` (crew-graph only)
+- `webOnStart`, `petOnStart`, `characters`, `view3dFps`, `view3dRows`, `view3dColumns` and `view3dMode` (crew-graph only)
+- `characters`: `who=character` pairs, e.g. `main=crab, Explore=bunny, *=random`. Empty: every agent is a crab. See [Characters](#characters).
 
 The default `panels` value is `3d,main,crew,architect,gate,agents,loops,receipt,log`. The 3d panel shows only while `/crew 3d` runs.
 
 ## What it can reach
 
 The mod only watches: every hook passes its event on unchanged, and a hook that throws passes the event on. It does reach outside the session in three places:
-- **Files:** it writes files only under `~/.claude/crew-graph/`, and only after `/crew web` or `/crew pet` (or `webOnStart`, `petOnStart`). The pet's own window state, its quit and close requests and its "show in Crew pane" requests live in `~/.claude/crew-graph/overlay/`.
+- **Files:** it writes files only under `~/.claude/crew-graph/` (this includes the `characters/` folder with its `README.txt`, the `characters-user.js` manifest and `characters-glb/` parts, written from the files you put there), and only after `/crew web` or `/crew pet` or `/crew characters reload` (or `webOnStart`, `petOnStart`). The pet's own window state, its quit and close requests and its "show in Crew pane" requests live in `~/.claude/crew-graph/overlay/`.
 - **Processes:** it starts the OS "open" command (`explorer`, `open` or `xdg-open`), or `orca tab create` inside Orca, when `/crew web` opens the page. With `/crew 3d` it also starts `node bin/crew-3d.mjs`, which starts a headless browser and listens on 127.0.0.1 (token-protected) for the pane's pointer input. With `/crew pet` it runs `npm install electron@44.4.5` (and Electron's own binary download) once, into `~/.claude/crew-graph/overlay-runtime/`, then `node overlay/launch.mjs`, which starts Electron detached, so the pet outlives the session. The pet opens a file (`orca file open`, or the OS) only when you click it, and only a file listed in that session's snapshot; it reads at most the first 64 KB of such a file, for the hover summary.
 - **Network:** none from the mod or the viewer. three.js r158 is bundled in `web/three.min.js` (MIT). Installing Electron downloads it from npm and from Electron's release host, once.
 
@@ -192,5 +250,5 @@ claude --plugin-dir plugins/crew-graph
 MIT, see `LICENSE`.
 
 - **Flightdeck:** © 2026 Stephen Casella, MIT. See `third_party/flightdeck-LICENSE.txt`. The ported files carry a header note.
-- **three.js:** © three.js authors, MIT. See `plugins/crew-graph/web/THREE_LICENSE.txt`.
+- **three.js:** © three.js authors, MIT. See `plugins/crew-graph/web/THREE_LICENSE.txt`. `web/gltf-loader.classic.js` is three.js r158's `GLTFLoader` turned into a classic script by `tools/build-gltf-classic.mjs` (license: `third_party/three-LICENSE.txt`).
 - **Clawd:** Clawd is Claude Code's mascot. The block-art and voxel crabs here are drawn from scratch as fan art.
