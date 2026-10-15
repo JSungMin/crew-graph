@@ -33,8 +33,9 @@ const embed = params.has('embed');
 const host = $('stage');
 let renderer = null;
 try {
-  renderer = new T.WebGLRenderer({ antialias: true });
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+  // Embedded, the page is drawn by software GL (SwiftShader) on the CPU: no MSAA, 1:1 pixels, low-power GPU hint.
+  renderer = new T.WebGLRenderer({ antialias: !embed, powerPreference: embed ? 'low-power' : 'default' });
+  renderer.setPixelRatio(embed ? 1 : Math.min(window.devicePixelRatio || 1, 2));
   host.appendChild(renderer.domElement);
 } catch (err) { renderer = null; }
 
@@ -93,6 +94,22 @@ const M = {
   sel: new T.MeshBasicMaterial({ color: 0x7ee0ff, transparent: true, opacity: 0.85, depthWrite: false, side: T.DoubleSide }),
 };
 const GLYPH = { z: glyphTex('z', '#bcd0ff'), q: glyphTex('?', '#ffe08a'), bang: glyphTex('!', '#ffb36b') };
+GLYPH.hurt = glyphTex('!', '#ff3355');
+// pink heart and red anger mark for the pet / pinch reactions (shared by every crab)
+const HEART_TEX = canvasTex(64, 64, (c) => {
+  c.translate(32, 34);
+  c.beginPath(); c.moveTo(0, 22); c.bezierCurveTo(-34, -2, -22, -26, 0, -10); c.bezierCurveTo(22, -26, 34, -2, 0, 22); c.closePath();
+  c.lineWidth = 5; c.lineJoin = 'round'; c.strokeStyle = 'rgba(120,10,50,.85)'; c.stroke();
+  c.fillStyle = '#ff5c9a'; c.fill();
+  c.fillStyle = 'rgba(255,255,255,.6)'; c.beginPath(); c.ellipse(-12, -9, 6, 4, -0.6, 0, 6.2832); c.fill();
+});
+const ANGER_TEX = canvasTex(64, 64, (c) => {
+  c.translate(32, 32); c.lineCap = 'round';
+  [['rgba(70,0,10,.9)', 12], ['#ff2d3d', 7]].forEach(([col, w]) => {
+    c.strokeStyle = col; c.lineWidth = w;
+    for (let i = 0; i < 4; i++) { c.save(); c.rotate(i * Math.PI / 2); c.beginPath(); c.arc(-17, -17, 14, 0.1, Math.PI / 2 - 0.1); c.stroke(); c.restore(); }
+  });
+});
 const TINT = { failed: new T.Color(0xc42f2f), done: new T.Color(0x7a6a64), killed: new T.Color(0x6b6b6b), dim: new T.Color(0x8a7f78) };
 
 /* ---------------------------------------------------------------- labels */
@@ -150,7 +167,14 @@ function makeCrab(d) {
     eyeM.push(V(1, 1.3, 0.3, 0, 0, 0, M.eye, g));
     const xe = new T.Group(); xe.visible = false; g.add(xe);
     [0.785, -0.785].forEach((r) => { const b = V(1.5, 0.32, 0.3, 0, 0, 0.05, M.xeye, xe); b.rotation.z = r; });
-    eyes.push({ g, x, xe });
+    // pinched squint: left eye '>' right eye '<'
+    const sqz = new T.Group(); sqz.visible = false; g.add(sqz);
+    const sd = x < 0 ? 1 : -1;
+    [-1, 1].forEach((u) => { const b = V(1.2, 0.42, 0.3, -0.1 * sd, 0.32 * u, 0.05, M.eye, sqz); b.rotation.z = -0.55 * sd * u; });
+    // petted: both eyes '^'
+    const hap = new T.Group(); hap.visible = false; g.add(hap);
+    [-1, 1].forEach((u) => { const b = V(1.0, 0.42, 0.3, 0.38 * u, -0.05, 0.05, M.eye, hap); b.rotation.z = -0.7 * u; });
+    eyes.push({ g, x, xe, sqz, hap });
   });
   const arms = [-1, 1].map((sg) => {
     const piv = new T.Group(); piv.position.set(sg * 3.5, 2.6, 0); body.add(piv);
@@ -178,6 +202,7 @@ function makeCrab(d) {
   scene.add(root);
   const cur = {}; POSE_KEYS.forEach((k) => { cur[k] = 0; }); cur.eyeSY = 1; cur.sq = 1; cur.aL = cur.aR = -0.25;
   return { id: d.id, d, s, h: 2.7 * s, root, body, mat, base: col, eyes, eyeM, arms, legs, anten, tipMat, hat, page, pageMat, ring, fx, label, labelKey: '',
+    re: newReact(), mood: { pets: 0, pinches: 0 },
     pos: new T.Vector3(), tgt: new T.Vector3(), cur, enterT: nowS(), born: nowS(), lastVerb: '', tintF: 0, yaw: 0, ph: (hash(d.id) % 628) / 100, depth: 0, ang: 0, lv: 1 };
 }
 
@@ -220,17 +245,21 @@ function updateCrab(a, dt, t, camPos) {
   poseTarget(v, tt, lt);
   const rate = 1 - Math.exp(-dt * (v === 'failed' ? 5 : 11)), c = a.cur;
   for (const k of POSE_KEYS) c[k] += (P[k] - c[k]) * rate;
-  a.body.position.y = c.by;
-  a.body.rotation.set(c.rx, c.ry, c.rz);
-  a.body.scale.set(1, c.sq, 1);
-  a.arms[0].rotation.set(c.aLx, 0, -c.aL);
-  a.arms[1].rotation.set(c.aRx, 0, c.aR);
+  // pet / pinch reactions ride on top of the smoothed pose and never write into it
+  const R = reactCrab(a, v, dt, now);
+  a.body.position.y = c.by + R.by;
+  a.body.rotation.set(c.rx + R.rx, c.ry, c.rz + R.rz);
+  const sxz = 1 + (1 - R.sy) * 0.45;
+  a.body.scale.set(sxz, c.sq * R.sy, sxz);
+  a.arms[0].rotation.set(c.aLx, R.armY, -(c.aL + R.dA));
+  a.arms[1].rotation.set(c.aRx, -R.armY, c.aR + R.dA);
   for (let i = 0; i < 4; i++) a.legs[i].position.y = 0.6 + c['l' + i];
   const xe = v === 'failed';
   for (let i = 0; i < 2; i++) {
     const e = a.eyes[i];
     e.g.position.x = e.x + c.eyeX * 0.45;
-    a.eyeM[i].visible = !xe; e.xe.visible = xe;
+    const em = xe ? 0 : R.squint ? 1 : R.happy ? 2 : 3;
+    a.eyeM[i].visible = em === 3; e.xe.visible = xe; e.sqz.visible = em === 1; e.hap.visible = em === 2;
     a.eyeM[i].scale.y = 1.3 * Math.max(0.05, c.eyeSY);
   }
   a.page.visible = v === 'read' || v === 'plan';
@@ -253,6 +282,9 @@ function updateCrab(a, dt, t, camPos) {
   a.tintF += (tf - a.tintF) * (1 - Math.exp(-dt * 4));
   const tc = v === 'failed' ? TINT.failed : a.d.status === 'killed' ? TINT.killed : v === 'done' ? TINT.done : TINT.dim;
   a.mat.color.copy(a.base).lerp(tc, a.tintF);
+  const re = a.re, eb = embed ? 1.4 : 1;
+  if (re.red > 0.01) a.mat.color.lerp(REDC, 0.4 * re.red);
+  a.mat.emissive.setRGB((0.32 * re.pet + 0.42 * re.red) * eb, (0.1 * re.pet + 0.02 * re.red) * eb, 0.17 * re.pet * eb);
   // placement
   a.pos.lerp(a.tgt, 1 - Math.exp(-dt * 3));
   a.root.position.copy(a.pos);
@@ -276,9 +308,121 @@ function refreshCrabLabel(a) {
 
 function disposeCrab(a) {
   scene.remove(a.root); scene.remove(a.label.sp);
+  for (let i = rfx.length - 1; i >= 0; i--) if (rfx[i].a === a) { rfxRelease(rfx[i]); rfx.splice(i, 1); }
   a.mat.dispose(); a.pageMat.dispose(); a.tipMat.dispose();
   a.label.tex.dispose(); a.label.mat.dispose();
   a.fx.z.forEach((s) => s.material.dispose()); a.fx.q.material.dispose(); a.fx.bang.material.dispose();
+}
+
+/* ---------------------------------------------------------------- reactions (pet / pinch) */
+// Purely client-side. A reaction is a small overlay (RX) computed per frame from timestamps in crab.re;
+// updateCrab adds it on top of the verb pose, so the pose smoothing underneath is never touched.
+const EM = embed ? 2 : 1; // the terminal shows a few pixels per crab: make effects twice as big
+const REDC = new T.Color(0xe02a1a);
+const RX = { by: 0, rx: 0, rz: 0, sy: 1, dA: 0, armY: 0, squint: false, happy: false };
+const RFX_MAX = 60;
+const rfxPool = [], rfx = [];
+function newReact() {
+  return { pinchT: -99, pinchTimes: [], grumpT: -99, redUntil: 0, red: 0, petUntil: 0, pet: 0, nextHeart: 0, session: false, sessionT: 0, happyT: -99 };
+}
+function rfxAcquire() {
+  let sp = rfxPool.pop();
+  if (!sp) {
+    if (rfx.length >= RFX_MAX) sp = rfx.shift().sp; // recycle the oldest
+    else { sp = new T.Sprite(new T.SpriteMaterial({ transparent: true, depthTest: false, fog: false })); sp.renderOrder = 11; scene.add(sp); }
+  }
+  return sp;
+}
+function rfxRelease(o) {
+  const sp = o.sp; sp.visible = false;
+  if (rfxPool.length < 16) rfxPool.push(sp);
+  else { scene.remove(sp); sp.material.dispose(); }
+}
+function spawnRfx(kind, a, delay) {
+  const sp = rfxAcquire();
+  sp.material.map = kind === 'heart' ? HEART_TEX : kind === 'anger' ? ANGER_TEX : GLYPH.hurt;
+  sp.material.opacity = 0; sp.material.rotation = 0; sp.visible = false;
+  const o = { sp, k: kind, a, t0: nowS() + (delay || 0), dur: kind === 'heart' ? 1.15 : kind === 'anger' ? 1.4 : 0.95, ph: Math.random() * 6.283, size: 1, x0: 0, y0: 0, z0: 0 };
+  if (kind === 'heart') {
+    const off = (Math.random() * 2 - 1) * 2.2 * a.s * EM;
+    o.x0 = a.pos.x + Math.cos(a.yaw) * off; o.z0 = a.pos.z - Math.sin(a.yaw) * off; o.y0 = a.pos.y + a.s * 6.4;
+    o.size = (0.6 + Math.random() * 0.3) * EM * (0.75 + a.s);
+  } else o.size = (kind === 'anger' ? 1.2 : 1.0) * EM * (0.75 + a.s);
+  rfx.push(o);
+}
+function updateRfx(now) {
+  for (let i = rfx.length - 1; i >= 0; i--) {
+    const o = rfx[i], sp = o.sp, a = o.a, u = (now - o.t0) / o.dur;
+    if (u >= 1 || agents.get(a.id) !== a) { rfx.splice(i, 1); rfxRelease(o); continue; }
+    if (u < 0) { sp.visible = false; continue; }
+    sp.visible = true;
+    const m = sp.material;
+    if (o.k === 'heart') {
+      sp.position.set(o.x0 + Math.sin(o.ph + u * 7) * 0.35 * EM, o.y0 + u * 2.4 * EM, o.z0);
+      sp.scale.setScalar(o.size * Math.max(0.01, easeOutBack(Math.min(1, u * 5))));
+      m.opacity = 1 - clamp((u - 0.6) / 0.4, 0, 1); m.rotation = 0.25 * Math.sin(o.ph + u * 5);
+    } else {
+      const side = o.k === 'anger' ? 2.4 * a.s : 0, pul = o.k === 'anger' ? 1 + 0.14 * Math.sin(u * 48) : 1;
+      sp.position.set(a.pos.x + Math.cos(a.yaw) * side, a.pos.y + a.s * (7.4 + a.body.position.y) + (o.k === 'anger' ? 0.5 : 0.3) * EM, a.pos.z - Math.sin(a.yaw) * side);
+      sp.scale.setScalar(o.size * pul * Math.max(0.01, easeOutBack(Math.min(1, u * 7))));
+      m.opacity = 1 - clamp((u - 0.7) / 0.3, 0, 1);
+    }
+  }
+}
+function pinchCrab(a) {
+  const now = nowS(), r = a.re;
+  r.pinchT = now; a.mood.pinches++;
+  r.pinchTimes.push(now);
+  while (r.pinchTimes.length && now - r.pinchTimes[0] > 2) r.pinchTimes.shift();
+  spawnRfx('bang', a, 0);
+  burst('a:' + a.id, 0xff5577, embed ? 14 : 8);
+  if (r.pinchTimes.length >= 3) { // 3 pinches within 2s: grumpy, pinches back
+    r.pinchTimes.length = 0;
+    r.grumpT = now + 0.3; r.redUntil = now + 2.3;
+    spawnRfx('anger', a, 0.3);
+  }
+}
+function keepPet(a, hold) {
+  const now = nowS(), r = a.re;
+  r.petUntil = now + hold;
+  if (!r.session) { r.session = true; r.sessionT = now; a.mood.pets++; if (selected === a.id) fillDetail(); }
+}
+function reactCrab(a, v, dt, now) {
+  const r = a.re, R = RX, fl = v === 'failed' ? 0.3 : 1; // a failed crab flinches but stays flopped
+  R.by = 0; R.rx = 0; R.rz = 0; R.sy = 1; R.dA = 0; R.armY = 0; R.squint = false; R.happy = false;
+  const petting = now < r.petUntil;
+  if (r.session && !petting) { // stroking stopped: one happy hop
+    r.session = false;
+    if (now - r.sessionT > 0.5) { r.happyT = now; for (let i = 0; i < 3; i++) spawnRfx('heart', a, i * 0.08); }
+  }
+  if (petting && now >= r.nextHeart) { r.nextHeart = now + 0.25; spawnRfx('heart', a, 0); }
+  r.pet += ((petting ? 1 : 0) - r.pet) * (1 - Math.exp(-dt * (petting ? 10 : 5)));
+  r.red += ((now >= r.grumpT && now < r.redUntil ? 1 : 0) - r.red) * (1 - Math.exp(-dt * 7));
+  const up = now - r.pinchT;
+  if (up >= 0 && up < 1) { // squash and stretch, little hop, squint
+    const sq = 1 - (embed ? 0.52 : 0.4) * Math.exp(-5 * up) * Math.cos(13 * up);
+    R.sy *= 1 + (sq - 1) * fl;
+    R.by += (embed ? 1.9 : 1.3) * fl * Math.sin(Math.PI * clamp((up - 0.1) / 0.42, 0, 1));
+    R.rz += 0.1 * fl * Math.sin(up * 30) * Math.exp(-up * 6);
+    if (up < 0.8) R.squint = true;
+  }
+  const ug = now - r.grumpT;
+  if (ug >= 0 && ug < 1) { // both claws snap forward twice
+    if (ug < 0.8) { const sw = Math.pow(Math.abs(Math.sin(Math.PI * ug / 0.4)), 0.5); R.armY = sw * 1.0 * fl; R.dA = 0.55 * sw * fl; R.rx += 0.12 * sw * fl; }
+    R.squint = true;
+  }
+  if (r.pet > 0.01) { // purr: roll +-8 deg at ~6 Hz
+    R.rz += r.pet * (embed ? 0.19 : 0.14) * fl * Math.sin(now * 37.7);
+    R.sy *= 1 + 0.035 * r.pet * Math.sin(now * 75.4);
+    R.by += 0.12 * r.pet * Math.abs(Math.sin(now * 18.8)) * fl;
+    if (r.pet > 0.25) R.happy = true;
+  }
+  const uh = now - r.happyT;
+  if (uh >= 0 && uh < 0.55) {
+    const h = Math.sin(Math.PI * uh / 0.55);
+    R.by += (embed ? 2.1 : 1.5) * fl * h; R.sy *= 1 + 0.1 * fl * h; R.happy = true;
+  }
+  return R;
 }
 
 /* ---------------------------------------------------------------- files */
@@ -604,7 +748,7 @@ function updateCamera(dt, now) {
 }
 
 /* ---------------------------------------------------------------- input */
-const ptr = { down: false, btn: 0, x: 0, y: 0, sx: 0, sy: 0, moved: 0, mx: -1, my: -1 };
+const ptr = { down: false, btn: 0, x: 0, y: 0, sx: 0, sy: 0, moved: 0, mx: -1, my: -1, pet: null, st: null };
 function pick(px, py) {
   const W = innerWidth, H = innerHeight; let best = null, bd = 1e9;
   const test = (o, r, bias) => {
@@ -614,8 +758,32 @@ function pick(px, py) {
     if (d < r && d < bd) { bd = d; best = o; }
   };
   files.forEach((f) => test(f, 22, 0));
-  agents.forEach((a) => { const r = clamp(a.s * 160 / Math.max(0.3, (cam.dist / 24)), 24, 70); test(a, r, 12); });
+  agents.forEach((a) => test(a, crabRadius(a), 12));
   return best;
+}
+const crabRadius = (a) => clamp(a.s * 160 / Math.max(0.3, (cam.dist / 24)), 24, 70);
+const crabAt = (px, py) => { const o = pick(px, py); return o && o.root ? o : null; };
+function updateCursor() {
+  if (!renderer) return;
+  let c = 'default', petting = false;
+  agents.forEach((a) => { if (a.re.session) petting = true; });
+  if ((ptr.down && ptr.pet) || petting) c = 'grabbing';
+  else if (!ptr.down && hover && hover.o.root) c = 'grab';
+  const st = renderer.domElement.style;
+  if (st.cursor !== c) st.cursor = c;
+}
+// Hover stroking: >=3 horizontal direction changes within 1.5s over the same crab pets it.
+function strokeHover(x, y) {
+  const now = nowS(), o = crabAt(x, y);
+  if (!o) { ptr.st = null; return; }
+  let st = ptr.st;
+  if (!st || st.id !== o.id) st = ptr.st = { id: o.id, dir: 0, ext: x, ch: [] };
+  const TH = embed ? 3 : 4;
+  if (!st.dir) { if (Math.abs(x - st.ext) >= TH) { st.dir = x > st.ext ? 1 : -1; st.ext = x; } }
+  else if (st.dir > 0) { if (x > st.ext) st.ext = x; else if (st.ext - x >= TH) { st.dir = -1; st.ext = x; st.ch.push(now); } }
+  else if (x < st.ext) st.ext = x; else if (x - st.ext >= TH) { st.dir = 1; st.ext = x; st.ch.push(now); }
+  while (st.ch.length && now - st.ch[0] > 1.5) st.ch.shift();
+  if (st.ch.length >= 3) keepPet(o, 0.55);
 }
 function setHoverFromMouse() {
   if (ptr.mx < 0 || ptr.down) return;
@@ -629,20 +797,30 @@ function setHoverFromMouse() {
     if (tip.textContent !== txt) tip.textContent = txt; tip.style.whiteSpace = 'pre-wrap'; tip.style.display = 'block';
     tip.style.left = Math.min(ptr.mx + 14, innerWidth - 350) + 'px'; tip.style.top = (ptr.my + 14) + 'px';
   } else if (tip) tip.style.display = 'none';
-  if (renderer) renderer.domElement.style.cursor = o && o.root ? 'pointer' : 'default';
 }
 if (renderer) {
   const el = renderer.domElement;
   el.addEventListener('contextmenu', (e) => e.preventDefault());
   el.addEventListener('pointerdown', (e) => {
     ptr.down = true; ptr.btn = e.button; ptr.x = ptr.sx = e.clientX; ptr.y = ptr.sy = e.clientY; ptr.moved = 0; lastInteract = nowS();
+    // a left drag that starts on a crab pets it instead of rotating the camera
+    ptr.pet = e.button === 0 && !e.shiftKey ? crabAt(e.clientX, e.clientY) : null; ptr.st = null;
     try { el.setPointerCapture(e.pointerId); } catch (x) { /* ignore */ }
   });
   el.addEventListener('pointermove', (e) => {
     ptr.mx = e.clientX; ptr.my = e.clientY;
-    if (!ptr.down) return;
+    if (!ptr.down) { strokeHover(e.clientX, e.clientY); return; }
     const dx = e.clientX - ptr.x, dy = e.clientY - ptr.y; ptr.x = e.clientX; ptr.y = e.clientY;
     ptr.moved += Math.abs(dx) + Math.abs(dy); lastInteract = nowS();
+    if (ptr.pet) {
+      const pa = ptr.pet;
+      if (ptr.moved >= 5 && agents.get(pa.id) === pa) {
+        anchorOf(pa, _p); _p.project(camera);
+        const cx = (_p.x * 0.5 + 0.5) * innerWidth, cy = (-_p.y * 0.5 + 0.5) * innerHeight;
+        if (Math.hypot(cx - e.clientX, cy - e.clientY) < crabRadius(pa) * 1.8) keepPet(pa, 0.45);
+      }
+      return;
+    }
     if (ptr.btn === 2 || e.shiftKey) {
       const k = cam.dist * 0.0016; autoFit = false;
       cam.tx += (-Math.cos(cam.theta) * dx + -Math.sin(cam.theta) * dy) * k;
@@ -651,14 +829,18 @@ if (renderer) {
   });
   const up = (e) => {
     if (!ptr.down) return; ptr.down = false;
+    if (ptr.pet && ptr.moved >= 5) ptr.pet.re.petUntil = Math.min(ptr.pet.re.petUntil, nowS());
+    ptr.pet = null;
     if (ptr.moved < 5 && ptr.btn === 0) {
       const o = pick(e.clientX, e.clientY);
-      selected = o && o.root ? o.id : null; setDetail();
+      selected = o && o.root ? o.id : null;
+      if (o && o.root) pinchCrab(o);
+      setDetail();
     }
   };
   el.addEventListener('pointerup', up);
-  el.addEventListener('pointercancel', () => { ptr.down = false; });
-  el.addEventListener('pointerleave', () => { ptr.mx = -1; hover = null; const t = $('tip'); if (t) t.style.display = 'none'; });
+  el.addEventListener('pointercancel', () => { ptr.down = false; ptr.pet = null; });
+  el.addEventListener('pointerleave', () => { ptr.mx = -1; hover = null; ptr.st = null; const t = $('tip'); if (t) t.style.display = 'none'; });
   el.addEventListener('wheel', (e) => {
     e.preventDefault(); autoFit = false; lastInteract = nowS();
     cam.dist = clamp(cam.dist * Math.exp(e.deltaY * 0.0012), 5, 220);
@@ -675,12 +857,14 @@ window.addEventListener('resize', resize);
 
 /* ---------------------------------------------------------------- main loop */
 let lastT = nowS(), clockT = 0;
-function frame() {
-  const now = nowS(), dt = Math.min(0.05, now - lastT); lastT = now; clockT += dt;
+// All animation / pose / particle / reaction / hover work. Embedded there is no rAF loop: __crewGrab() calls this once per grab.
+function step(dt) {
+  const now = nowS(); clockT += dt;
   if (renderer) {
     updateCamera(dt, now);
     camera.updateMatrixWorld();
     agents.forEach((a) => updateCrab(a, dt, clockT, camera.position));
+    updateRfx(now);
     files.forEach((f) => {
       f.pos.lerp(f.tgt, 1 - Math.exp(-dt * 3));
       f.g.position.set(f.pos.x, f.pos.y + 0.18 * Math.sin(clockT * 1.5 + f.ph), f.pos.z);
@@ -690,8 +874,12 @@ function frame() {
     updateEdges();
     updateParticles(now);
     setHoverFromMouse();
-    renderer.render(scene, camera);
+    updateCursor();
   }
+}
+function frame() {
+  const now = nowS(), dt = Math.min(0.05, now - lastT); lastT = now;
+  if (renderer) { step(dt); renderer.render(scene, camera); }
   requestAnimationFrame(frame);
 }
 
@@ -804,6 +992,7 @@ function fillDetail() {
   txt('dSteps', `${d.steps != null ? d.steps : '-'} / ${d.calls != null ? d.calls : '-'}`);
   txt('dTok', `${fmtK(d.ctxTokens)} / ${fmtK(d.outTokens)}`);
   txt('dTime', d.startedAt ? fmtDur((d.endedAt || now) - d.startedAt) : '-');
+  txt('dMood', '\u2665 ' + a.mood.pets + ' \u00b7 \uaf2c\uc9d1\ud798 ' + a.mood.pinches);
 }
 const closeBtn = $('dClose'); if (closeBtn) closeBtn.addEventListener('click', () => { selected = null; setDetail(); });
 function setChip() {
@@ -920,6 +1109,8 @@ function demoTick() {
 let grabCanvas = null;
 window.__crewGrab = (w, h) => {
   if (!renderer) return '';
+  const now = nowS(), dt = clamp(now - lastT, 0, 0.25); lastT = now;
+  step(dt);
   renderer.render(scene, camera);
   if (!grabCanvas) grabCanvas = document.createElement('canvas');
   grabCanvas.width = w; grabCanvas.height = h;
@@ -936,7 +1127,7 @@ window.__crewGrab = (w, h) => {
 
 /* ---------------------------------------------------------------- boot */
 resize();
-requestAnimationFrame(frame);
+if (!embed) requestAnimationFrame(frame); // embedded: rendering is driven by __crewGrab, never by a continuous loop
 setInterval(tickHud, 250);
 setChip();
 if (embed) document.body.classList.add('embed');
