@@ -338,19 +338,27 @@ async function startWeb($: EngineInterface, shouldOpen: boolean): Promise<string
   await update($, web, () => ({ isOn: true, dir, lastWriteAt: 0 }))
   await writeWeb($)
   const page = `${dir}/index.html`
-  if (shouldOpen) await openInBrowser($, page)
-  return `Crew web view: ${page}`
+  const where = shouldOpen ? await openInBrowser($, page) : ''
+  return `Crew web view: ${page}${where}`
 }
 
-async function openInBrowser($: EngineInterface, page: string) {
+/** Inside Orca, a browser tab beside the terminal (full pixels, real mouse); else the system browser. */
+async function openInBrowser($: EngineInterface, page: string): Promise<string> {
+  if ((await $.env.get('TERM_PROGRAM')) === 'Orca') {
+    const url = `file://${page.startsWith('/') ? '' : '/'}${page}`
+    const res = await $.process.run(['orca', 'tab', 'create', '--url', url, '--json'], { timeoutMs: 15_000 }).catch(() => null)
+    if (res && res.exitCode === 0) return ' (opened in an Orca browser tab)'
+  }
   const isWin = (await $.env.get('OS')) === 'Windows_NT'
   const argv = isWin ? ['explorer', page.replace(/\//g, '\\')] : [(await $.env.get('XDG_SESSION_TYPE')) ? 'xdg-open' : 'open', page]
   await $.process.run(argv, { timeoutMs: 10_000 }).catch(() => undefined)
+  return ''
 }
 
 // ---------------------------------------------------------------- 3d view in the pane
 // bin/crew-3d.mjs renders the web view in a headless Chrome/Edge and streams it as Raster
-// cells (half blocks, two pixels a cell); each frame is blitted into the pane's `crew3d`.
+// cells (each cell the block glyph and two colours that best fit its 4x8 pixels, bin/cells.mjs)
+// or, where the terminal draws pictures, as Image frames; each is blitted into the pane's `crew3d`.
 
 const RASTER_KEY = 'crew3d'
 const VIEW3D_OFF: View3d = { isOn: false, cols: 0, rows: 0, status: '' }
@@ -425,7 +433,9 @@ async function start3d($: EngineInterface, cols: number, rows: number, fps: numb
   helper = null
   await update($, view3d, () => ({ isOn: true, cols, rows, status: 'starting the renderer…' }))
   void run3d($, gen, cols, rows, fps, w.dir)
-  return `Crew 3D view: ${cols}x${rows} cells in the pane, ${mode3d === 'image' ? 'pixels' : 'colour blocks (2x2 pixels a cell)'}, ${fps} fps. Drag to rotate, wheel to zoom, click a crab to pinch it, stroke it to pet it.`
+  const inOrca = (await $.env.get('TERM_PROGRAM')) === 'Orca'
+  const full = inOrca && mode3d === 'cells' ? ' Full size: /crew web opens it in an Orca browser tab.' : ''
+  return `Crew 3D view: ${cols}x${rows} cells in the pane, ${mode3d === 'image' ? 'pixels' : 'block glyphs fitted to 4x8 pixels a cell'}, ${fps} fps. Drag to rotate, wheel to zoom, click a crab to pinch it, stroke it to pet it.${full}`
 }
 
 async function stop3d($: EngineInterface, status = '') {
@@ -487,6 +497,13 @@ async function run3d($: EngineInterface, gen: number, cols: number, rows: number
               .catch(() => ({ deny: 'blit failed' }))
           }
           if ('deny' in res && res.deny !== undefined) {
+            // A terminal the engine draws no pictures in: say why, and go on in cells.
+            if (mode3d === 'image' && /draws its alt|cannot read files/.test(res.deny)) {
+              await $.ui.toast(`crew 3d: no pixels in this terminal (${res.deny}); using block glyphs`)
+              // start3d moves view3dGen on, so this run ends without stopping the new one.
+              await start3d($, cols, rows, fps, 'cells')
+              return
+            }
             denies += 1
             // The pane is closed or the panel hidden for ~5 s: stop the browser.
             if (denies > 40) isDone = true

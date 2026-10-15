@@ -22,7 +22,7 @@ crew-graph absorbs **[Flightdeck](https://github.com/scasella/claude-flightdeck)
 
 | Panel | Shows |
 | --- | --- |
-| **3d** | The three.js view itself, inside the pane (`/crew 3d`): a headless browser renders it, and the pane draws it as half-block colour cells, two pixels a cell. |
+| **3d** | The three.js view itself, inside the pane (`/crew 3d`): a headless browser renders it, and the pane draws it as block glyphs fitted to 4x8 pixels a cell. |
 | **main** | Model, effort, permission mode and request count. A context gauge with compactions (⟲). Cost and rate-limit windows with reset countdowns. Time to first token and tok/s. |
 | **crew** | Clawd for the main loop (big) and for each subagent (mini), animated per action. The subagent tree, with grandchildren. Every plan, doc and code file a loop touched, with who read (`r`) or wrote (`w`) it. |
 | **architect** | Consults on a timeline, and the inferred moment of each one. |
@@ -64,8 +64,9 @@ The three.js view runs inside the Crew pane, and you can touch it.
 | Stroke a crab | **Pet** it, by dragging from the crab or hovering back and forth: `^ ^` eyes, a purring wiggle, rising hearts and a happy hop |
 
 - **How it draws:** `bin/crew-3d.mjs` opens the viewer (`index.html?embed`) in a headless Chrome or Edge and streams each frame into the pane, in one of two modes:
-  - **Colour blocks:** in any truecolour terminal, quadrant block glyphs give 2x2 pixels a cell, with each cell's best two colours (220x56 pixels at 110x28 cells).
-  - **Real pixels:** on kitty and Ghostty, an `Image` frame (`view3dMode: auto|cells|image`).
+  - **Block glyphs:** in any truecolour terminal. Each cell takes the block glyph and the two colours that best fit its 4x8 rendered pixels (`bin/cells.mjs`). The glyphs are the quadrants, the lower eighths and the left quarter and three-quarter blocks, so an edge lands to an eighth of a cell's height. Each frame stays within the Raster's 1024 colour pairs, dropping colour bits only when it must.
+  - **Real pixels:** on kitty and Ghostty, an `Image` frame (`view3dMode: auto|cells|image`). Claude Code draws pictures only in those two, through kitty Unicode placeholders. Where it cannot, the mod says why in a toast and goes on in block glyphs.
+- **Orca:** Orca's terminal (xterm.js) has kitty graphics but no Unicode placeholders, so the pane uses block glyphs there. For full resolution, `/crew web` opens the same view in an Orca browser tab beside the terminal.
 - **How input works:** an input layer (a `Client` region over the picture) catches the pointer. The mod forwards it to the helper on `127.0.0.1`, authenticated by a token, and the helper replays it as DOM pointer and wheel events in the page.
 - **Cost:** the browser renders on the CPU (SwiftShader), so the view renders only when a frame is grabbed. That is `view3dFps` (default 10) for 3 s after input and 4 fps when idle, at 4x8 CSS pixels a cell, with no MSAA.
 - **Size and teardown:** `/crew 3d` asks the pane for `view3dColumns` (default 110) columns, and the view is `view3dRows` (default 28) rows tall. When the pane width changes, the renderer restarts at the new size. When the pane stays closed for about 5 s, or on `/crew 3d off`, the browser is stopped.
@@ -78,7 +79,7 @@ The three.js view runs inside the Crew pane, and you can touch it.
 /crew web
 ```
 
-This copies the viewer to `~/.claude/crew-graph/` and opens `index.html` in your browser. While work runs, the mod rewrites `data.js` there at most every 450 ms. The page reloads it by script-tag injection, so it works from `file://` with no server and no network.
+This copies the viewer to `~/.claude/crew-graph/` and opens `index.html` in your browser (inside Orca, in an Orca browser tab via `orca tab create`). While work runs, the mod rewrites `data.js` there at most every 450 ms. The page reloads it by script-tag injection, so it works from `file://` with no server and no network.
 
 - Every agent is a voxel Clawd that poses like its terminal twin. Agents are laid out as a tree with main at the root. Pinch it by clicking it, and pet it by stroking it.
 - Plans, docs and code float beside the agents that touched them. Read edges are blue, write edges orange.
@@ -130,7 +131,7 @@ The default `panels` value is `3d,main,crew,architect,gate,agents,loops,receipt,
 
 The mod only watches: every hook passes its event on unchanged, and a hook that throws passes the event on. It does reach outside the session in three places:
 - **Files:** it writes files only under `~/.claude/crew-graph/`, and only after `/crew web` (or `webOnStart`).
-- **Processes:** it starts the OS "open" command (`explorer`, `open` or `xdg-open`) when `/crew web` opens the page. With `/crew 3d` it also starts `node bin/crew-3d.mjs`, which starts a headless browser and listens on 127.0.0.1 (token-protected) for the pane's pointer input.
+- **Processes:** it starts the OS "open" command (`explorer`, `open` or `xdg-open`), or `orca tab create` inside Orca, when `/crew web` opens the page. With `/crew 3d` it also starts `node bin/crew-3d.mjs`, which starts a headless browser and listens on 127.0.0.1 (token-protected) for the pane's pointer input.
 - **Network:** none. three.js r158 is bundled in `web/three.min.js` (MIT).
 
 What it keeps:

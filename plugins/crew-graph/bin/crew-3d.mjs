@@ -4,11 +4,12 @@
 //
 //   node crew-3d.mjs --page <file:///…/index.html> --cols 100 --rows 28 [--fps 10]
 //                    [--mode cells|image] [--out <dir for image frames>] [--cellw 8 --cellh 16]
+//                    [--glyphs blocks|quad] [--dump <file: the last raw RGB grab, for checks>]
 //
 // stdout, one line each:
 //   P <port> <token>                    input endpoint: POST http://127.0.0.1:<port>/input?t=<token>
-//   C <cols> <rows> <base64 cells>      a Raster frame (RasterProps.cells): quadrant blocks, 2x2
-//                                       pixels a cell, each cell's best two colours
+//   C <cols> <rows> <base64 cells>      a Raster frame (RasterProps.cells): each cell the block
+//                                       glyph and two colours that best fit its 4x8 pixels (cells.mjs)
 //   I <path> <width> <height> <gen>     an Image frame: raw RGB file written for the terminal
 //   E <message>                         an error
 // Chrome is driven over --remote-debugging-pipe: when this process dies the pipe closes and the
@@ -19,6 +20,8 @@ import { existsSync, mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync }
 import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+
+import { SAMPLE_H, SAMPLE_W, encodeCells } from './cells.mjs'
 
 const arg = (name, fallback) => {
   const i = process.argv.indexOf(`--${name}`)
@@ -37,16 +40,16 @@ const mode = arg('mode', 'cells') === 'image' ? 'image' : 'cells'
 const cellW = Math.max(4, Number(arg('cellw', 8)) | 0)
 const cellH = Math.max(8, Number(arg('cellh', 16)) | 0)
 const outDir = arg('out', '')
+const glyphs = arg('glyphs', 'blocks') === 'quad' ? 'quad' : 'blocks'
+const dumpTo = arg('dump', '')
 
-// The page's own size in CSS pixels, and the size of each grabbed frame.
-//   cells: 2x2 pixels a cell, grabbed at 2x again and box-filtered (supersampling)
+// The page's own size in CSS pixels, grabbed 1:1.
+//   cells: 4x8 pixels a cell, the cell's own shape; the encoder fits a glyph to each cell's 32
 //   image: the cell box's real pixels (capped so a frame stays small)
-const SS = 2
-// cells: 4x8 CSS pixels a cell keeps the cell's shape and still supersamples its 2x2 pixels.
-const pageW = mode === 'image' ? Math.min(1600, cols * cellW) : cols * 4
-const pageH = mode === 'image' ? Math.min(1000, rows * cellH) : rows * 8
-const grabW = mode === 'image' ? pageW : cols * 2 * SS
-const grabH = mode === 'image' ? pageH : rows * 2 * SS
+const pageW = mode === 'image' ? Math.min(1600, cols * cellW) : cols * SAMPLE_W
+const pageH = mode === 'image' ? Math.min(1000, rows * cellH) : rows * SAMPLE_H
+const grabW = pageW
+const grabH = pageH
 
 const say = line => process.stdout.write(`${line}\n`)
 const fail = msg => {
@@ -268,100 +271,8 @@ server = createServer((req, res) => {
 server.listen(0, '127.0.0.1', () => say(`P ${server.address().port} ${token}`))
 
 // ---------------------------------------------------------------- frames
-// Quadrant blocks by the four pixels they cover: bit 1 top-left, 2 top-right, 4 bottom-left,
-// 8 bottom-right; the set bits take the foreground colour.
-const QUAD = [0x20, 0x2598, 0x259d, 0x2580, 0x2596, 0x258c, 0x259e, 0x259b, 0x2597, 0x259a, 0x2590, 0x259c, 0x2584, 0x2599, 0x259f, 0x2588]
-const cells = new Uint32Array(cols * rows * 3)
-const sub = new Float32Array(cols * 2 * rows * 2 * 3)
-
-/** Box-filters the supersampled grab to 2x2 subpixels a cell. */
-function downsample(rgb) {
-  const sw = cols * 2
-  const sh = rows * 2
-  for (let y = 0; y < sh; y += 1) {
-    for (let x = 0; x < sw; x += 1) {
-      let r = 0
-      let g = 0
-      let b = 0
-      for (let dy = 0; dy < SS; dy += 1) {
-        for (let dx = 0; dx < SS; dx += 1) {
-          const i = ((y * SS + dy) * grabW + (x * SS + dx)) * 3
-          r += rgb[i]
-          g += rgb[i + 1]
-          b += rgb[i + 2]
-        }
-      }
-      const o = (y * sw + x) * 3
-      const n = SS * SS
-      sub[o] = r / n
-      sub[o + 1] = g / n
-      sub[o + 2] = b / n
-    }
-  }
-}
-
-const pack = (r, g, b) => ((Math.round(r) & 255) << 16) | ((Math.round(g) & 255) << 8) | (Math.round(b) & 255)
-
-/** Each cell: the split of its four pixels into two colours with the least error. */
 function toCells(rgb) {
-  downsample(rgb)
-  const sw = cols * 2
-  const p = new Float32Array(12)
-  for (let cy = 0; cy < rows; cy += 1) {
-    for (let cx = 0; cx < cols; cx += 1) {
-      const idx = [(2 * cy) * sw + 2 * cx, (2 * cy) * sw + 2 * cx + 1, (2 * cy + 1) * sw + 2 * cx, (2 * cy + 1) * sw + 2 * cx + 1]
-      for (let k = 0; k < 4; k += 1) {
-        p[k * 3] = sub[idx[k] * 3]
-        p[k * 3 + 1] = sub[idx[k] * 3 + 1]
-        p[k * 3 + 2] = sub[idx[k] * 3 + 2]
-      }
-      let best = 0
-      let bestErr = Infinity
-      let fg = [0, 0, 0]
-      let bg = [0, 0, 0]
-      // Masks 1..7 cover every two-way split once (8..14 are their complements); 0 is uniform.
-      for (let mask = 0; mask < 8; mask += 1) {
-        const a = [0, 0, 0]
-        const b = [0, 0, 0]
-        let na = 0
-        let nb = 0
-        for (let k = 0; k < 4; k += 1) {
-          const t = mask & (1 << k) ? a : b
-          t[0] += p[k * 3]
-          t[1] += p[k * 3 + 1]
-          t[2] += p[k * 3 + 2]
-          if (mask & (1 << k)) na += 1
-          else nb += 1
-        }
-        if (na) for (let j = 0; j < 3; j += 1) a[j] /= na
-        if (nb) for (let j = 0; j < 3; j += 1) b[j] /= nb
-        let err = 0
-        for (let k = 0; k < 4; k += 1) {
-          const t = mask & (1 << k) ? a : b
-          const dr = p[k * 3] - t[0]
-          const dg = p[k * 3 + 1] - t[1]
-          const db = p[k * 3 + 2] - t[2]
-          err += dr * dr * 0.3 + dg * dg * 0.59 + db * db * 0.11
-        }
-        if (err < bestErr - 1e-6) {
-          bestErr = err
-          best = mask
-          fg = a
-          bg = b
-        }
-      }
-      const c = (cy * cols + cx) * 3
-      if (best === 0) {
-        cells[c] = 0x20
-        cells[c + 1] = pack(bg[0], bg[1], bg[2])
-        cells[c + 2] = pack(bg[0], bg[1], bg[2])
-      } else {
-        cells[c] = QUAD[best]
-        cells[c + 1] = pack(fg[0], fg[1], fg[2])
-        cells[c + 2] = pack(bg[0], bg[1], bg[2])
-      }
-    }
-  }
+  const { cells } = encodeCells(rgb, cols, rows, { glyphs })
   return Buffer.from(cells.buffer).toString('base64')
 }
 
@@ -391,6 +302,7 @@ async function main() {
       if (typeof b64 === 'string' && b64.length > 0) {
         const rgb = Buffer.from(b64, 'base64')
         if (rgb.length === grabW * grabH * 3) {
+          if (dumpTo) writeFileSync(dumpTo, rgb)
           if (mode === 'image') writeImage(rgb)
           else {
             const out = toCells(rgb)
