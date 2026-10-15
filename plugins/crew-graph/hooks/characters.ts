@@ -12,14 +12,26 @@ export type CharFs = {
   exists(path: string): Promise<boolean>
 }
 
-/** The characters that ship with the viewer (web/characters.js); a test keeps this list and that file in step. */
-export const BUILTIN_CHARACTERS: readonly { id: string; name: string }[] = [
-  { id: 'crab', name: 'Clawd crab' },
-  { id: 'bunny', name: 'Mochi bunny' },
-  { id: 'cat', name: 'Loaf cat' },
-  { id: 'mochi', name: 'Mochi hamster' },
-  { id: 'robot', name: 'Boxbot' },
+/** The characters that ship with the viewer (web/characters.js); a test keeps this list and that file in step. `traits`: the role words `auto` matches. */
+export const BUILTIN_CHARACTERS: readonly { id: string; name: string; traits: readonly string[] }[] = [
+  { id: 'crab', name: 'Clawd crab', traits: ['lead', 'main', 'generalist'] },
+  { id: 'bunny', name: 'Mochi bunny', traits: ['docs', 'write', 'summarize', 'quick', 'web'] },
+  { id: 'cat', name: 'Loaf cat', traits: ['explore', 'search', 'investigate', 'review', 'locate'] },
+  { id: 'mochi', name: 'Mochi hamster', traits: ['plan', 'architect', 'design', 'think', 'advisor'] },
+  { id: 'robot', name: 'Boxbot', traits: ['code', 'build', 'fix', 'test', 'implement'] },
 ]
+
+/** "traits": ["Code", "test", ...] -> lower-case words, at most 16 of 1-24 letters, digits, - _ (web/characters-core.js reads them the same way). */
+export const traitsOf = (list: unknown): string[] => {
+  const out: string[] = []
+  if (!Array.isArray(list)) return out
+  for (const x of list) {
+    const w = typeof x === 'string' ? x.trim().toLowerCase() : ''
+    if (/^[a-z0-9_-]{1,24}$/.test(w) && !out.includes(w)) out.push(w)
+    if (out.length >= 16) break
+  }
+  return out
+}
 
 /** `$.fs.read` and `$.fs.write` refuse over 4 MiB: a GLB that big cannot be embedded. */
 export const HOST_FILE_MAX = 4 * 1024 * 1024
@@ -27,7 +39,7 @@ const PART_CHARS = 3_000_000
 const MANIFEST_MAX = 3 * 1024 * 1024
 
 export type UserChar =
-  | { kind: 'voxel'; file: string; id: string; name: string; json: unknown }
+  | { kind: 'voxel'; file: string; id: string; name: string; json: unknown; traits: string[] }
   | { kind: 'glb'; file: string; id: string; name: string; bytes: number; rev: string; parts: string[] | null }
 
 export type Scan = { chars: UserChar[]; notes: string[]; rev: string }
@@ -88,7 +100,7 @@ export async function scanCharacters(fs: CharFs, folder: string, withData: boole
         continue
       }
       manifestBytes += size
-      chars.push({ kind: 'voxel', file: e.name, id, name: typeof j.name === 'string' && j.name ? j.name.slice(0, 60) : id, json: { ...(json as object), id } })
+      chars.push({ kind: 'voxel', file: e.name, id, name: typeof j.name === 'string' && j.name ? j.name.slice(0, 60) : id, json: { ...(json as object), id }, traits: traitsOf((j as { traits?: unknown }).traits) })
     } else if (low.endsWith('.glb')) {
       const id = unique(safeCharId(e.name))
       const rev = `${e.size}-${Math.round(e.mtimeMs)}`
@@ -152,9 +164,11 @@ export const CHAR_README = `crew-graph characters
 Drop your own characters in this folder. The mod scans it when a session starts (/crew web, /crew pet)
 and on  /crew characters reload ; a running pet or browser view picks the change up within a few seconds.
 Then choose who is who with the "characters" option, for example
-    main=crab, Explore=bunny, sonnet-coder=mymodel, *=random
-(left side: an agent id or type, "architect", or a prefix with * ; right side: a character id, or random).
-/crew characters lists what was found.
+    main=crab, Explore=bunny, sonnet-coder=mymodel, *=auto
+(left side: an agent id or type, "architect", or a prefix with * ; right side: a character id, "random" (a stable pick per agent)
+or "auto" (the character whose traits fit the agent's role)). A part without "=" means "*=": "auto" alone is fine.
+The pet's Settings window (tray icon or right-click menu, "Settings...") sets characters too: a default, a character per agent type,
+or one agent, and it wins over the option. /crew characters lists what was found and what each agent would get.
 
 Two kinds of file
 -----------------
@@ -185,6 +199,11 @@ Two kinds of file
    LEFT eye in each expression (the right one is mirrored); without them the viewer draws default ones.
    Also optional: "props": { "page": {"at":[x,y,z]}, "hat": {"at":[x,y,z],"s":1}, "anten": {"at":[x,y,z],"spread":1.5} },
    "hit": { "y": 3, "r": 1 }, "shadow": [8,6], "travel": 1 (how far the eyes slide).
+   "traits": ["code", "test", "cheerful"]: role words for "auto". An agent's role comes from its type (Explore, Plan, sonnet-coder,
+   code-reviewer, general-purpose, ...), the words of its task and what it is doing; the character whose traits overlap the most is
+   chosen (siblings are spread over equally good characters, and an agent keeps the character it was first given). Words that
+   count: lead main generalist code build fix test implement run explore search investigate locate review docs write summarize
+   quick web plan architect design think advisor. Other words are fine, they just never match.
 
    The rig (every bone is optional; an animation skips the bones a character lacks):
      root body head earL earR eyeL eyeR mouth armL handL armR handR legL1 legL2 legL3 legR1 legR2 legR3 tail
@@ -200,25 +219,194 @@ Two kinds of file
    folder by the page itself, which the desktop pet can do and a browser on file:// may refuse.
 `
 
-/** What `/crew characters` prints: the built-in and user characters, what was wrong with a file, and the current assignment. */
-export function describeCharacters(scan: Scan, spec: string, folder: string, rules: readonly (readonly [string, string])[], reloaded: boolean): string {
+/** What `/crew characters` prints: the built-in and user characters, what was wrong with a file, and the current assignment. `extra`: more lines (the pet's own settings, the agents' picks). */
+export function describeCharacters(
+  scan: Scan,
+  spec: string,
+  folder: string,
+  rules: readonly (readonly [string, string])[],
+  reloaded: boolean,
+  extra: readonly string[] = [],
+): string {
   const lines: string[] = []
-  lines.push(`Built-in: ${BUILTIN_CHARACTERS.map(c => `${c.id} (${c.name})`).join(', ')}`)
+  lines.push(`Built-in: ${BUILTIN_CHARACTERS.map(c => `${c.id} (${c.name}: ${c.traits.join(', ')})`).join('; ')}`)
   if (scan.chars.length === 0) lines.push(`Your characters: none yet. Put *.json (voxel) or *.glb (skinned) files in ${folder}; README.txt there says how.`)
   else {
     lines.push(`Your characters (${folder}):`)
     for (const c of scan.chars) {
-      lines.push(c.kind === 'voxel' ? `  ${c.id}  voxel  ${c.file}` : `  ${c.id}  glb    ${c.file}  ${(c.bytes / 1048576).toFixed(1)} MiB  ${c.parts ? 'embedded' : 'read from the file'}`)
+      lines.push(
+        c.kind === 'voxel'
+          ? `  ${c.id}  voxel  ${c.file}${c.traits.length ? `  traits: ${c.traits.join(', ')}` : ''}`
+          : `  ${c.id}  glb    ${c.file}  ${(c.bytes / 1048576).toFixed(1)} MiB  ${c.parts ? 'embedded' : 'read from the file'}`,
+      )
     }
   }
   for (const n of scan.notes) lines.push(`  ! ${n}`)
-  if (spec.trim() === '') lines.push('Assignment: no "characters" option set, so every agent is a crab. Set it in /config, e.g. main=crab, Explore=bunny, *=random')
+  if (spec.trim() === '') lines.push('Assignment: no "characters" option set, so every agent is a crab (unless the pet\'s Settings say otherwise). Set it in /config, e.g. main=crab, Explore=bunny, *=auto')
   else {
     const ids = new Set([...BUILTIN_CHARACTERS.map(c => c.id.toLowerCase()), ...scan.chars.map(c => c.id.toLowerCase())])
     lines.push(`Assignment: ${spec.trim()}`)
-    for (const [who, ch] of rules) lines.push(`  ${who} -> ${ch === 'random' ? 'a stable pick by agent id' : ids.has(ch.toLowerCase()) ? ch : `${ch} (not found: a crab)`}`)
+    for (const [who, ch] of rules) {
+      lines.push(`  ${who} -> ${ch === 'random' ? 'a stable pick by agent id' : ch === 'auto' ? 'the character whose traits fit the agent\'s role' : ids.has(ch.toLowerCase()) ? ch : `${ch} (not found: a crab)`}`)
+    }
     lines.push('  anyone else -> a stable pick by agent id among all of the above')
   }
+  lines.push(...extra)
   lines.push(reloaded ? 'Rescanned: a running pet or browser view picks the change up within a few seconds.' : '/crew characters reload rescans the folder.')
   return lines.join('\n')
+}
+
+// ---------------------------------------------------------------- `auto`: the character whose traits fit the agent's role
+// A twin of roleOf / autoPick in web/characters-core.js (the pet runs that one); a test feeds both the same agents and holds them together.
+
+export type RoleAgent = { id: string; type?: string; description?: string; verb?: string; isArchitect?: boolean; parentId?: string | null }
+export type Traited = { id: string; traits: readonly string[] }
+export type AutoPick = { id: string; why: string[]; parent: string }
+export type AutoState = { locks: Map<string, AutoPick> }
+
+const TYPE_ROLES: [RegExp, string[]][] = [
+  [/plan|architect|advisor|design|strateg/, ['plan', 'architect', 'design', 'think', 'advisor']],
+  [/explor|search|locat|scout|find|investig|research|survey/, ['explore', 'search', 'investigate', 'locate']],
+  [/review|audit|critic|verif|inspect|lint/, ['review', 'investigate']],
+  [/doc|writer|write|summar|readme|wiki|translat|scribe|changelog/, ['docs', 'write', 'summarize']],
+  [/web|fetch|browse|crawl|scrape/, ['web', 'quick']],
+  [/cod(e|er|ing)|implement|build|develop|\bdev\b|engineer|fix|debug|refactor|test|tdd|resolver/, ['code', 'build', 'fix', 'test', 'implement']],
+  [/quick|fast|haiku|mini|lite/, ['quick']],
+  [/general|purpose|orchestr|coordinat|manager|lead/, ['generalist', 'lead']],
+]
+const TEXT_ROLES: [RegExp, string[]][] = [
+  [/\b(implement\w*|code|coding|refactor\w*|build|compile|migrat\w*)\b|구현|코드/, ['code', 'build', 'implement']],
+  [/\b(fix\w*|bugs?|debug\w*|patch\w*|repair\w*)\b|수정|버그/, ['fix', 'code']],
+  [/\b(tests?|testing|specs?)\b|테스트/, ['test']],
+  [/\b(run|execute|npm|script)\b|실행/, ['run']],
+  [/\b(review\w*|audit\w*|critique|verify|check\w*)\b|리뷰|검토/, ['review']],
+  [/\b(search\w*|find|locate|grep|look ?up|map|trace|survey)\b|검색|탐색|찾/, ['search', 'locate', 'explore']],
+  [/\b(investigat\w*|analy[sz]\w*|research\w*|explor\w*|explain\w*)\b|조사|분석/, ['investigate', 'explore']],
+  [/\b(docs?|document\w*|readme|write|writing|changelog|guide|translat\w*)\b|문서|작성/, ['docs', 'write']],
+  [/\b(summari[sz]\w*|summary|tl;?dr)\b|요약/, ['summarize']],
+  [/\b(web|fetch|url|https?|browse)\b/, ['web']],
+  [/\b(plan\w*|design\w*|architect\w*|strategy|propose)\b|계획|설계/, ['plan', 'design']],
+]
+const VERB_ROLES: Record<string, string[]> = {
+  edit: ['code', 'fix', 'implement'],
+  run: ['run', 'build', 'test'],
+  read: ['explore', 'search'],
+  search: ['search', 'explore', 'locate'],
+  web: ['web'],
+  plan: ['plan', 'design'],
+  think: ['think'],
+  spawn: ['lead'],
+}
+const W_TYPE = 3
+const W_TEXT = 1.2
+const W_VERB = 0.8
+const W_REPEAT = 0.75
+
+/** An agent's role as { word: weight }, from its type, its task text and its verb. */
+export function roleOf(agent: RoleAgent): Record<string, number> {
+  const w: Record<string, number> = {}
+  const add = (words: string[], k: number) => words.forEach(x => (w[x] = (w[x] ?? 0) + k))
+  const type = String(agent.type ?? '').toLowerCase()
+  if (agent.id === 'main' || type === 'main') add(['lead', 'main', 'generalist'], W_TYPE)
+  if (agent.isArchitect) add(['architect', 'plan', 'design', 'think', 'advisor'], W_TYPE)
+  for (const [re, words] of TYPE_ROLES) {
+    if (re.test(type)) {
+      add(words, W_TYPE)
+      break
+    }
+  }
+  const text = String(agent.description ?? '').toLowerCase().slice(0, 300)
+  for (const [re, words] of TEXT_ROLES) if (re.test(text)) add(words, W_TEXT)
+  const v = agent.verb ? VERB_ROLES[agent.verb] : undefined
+  if (v) add(v, W_VERB)
+  return w
+}
+
+/** The best character for the role; the first pick of an agent is kept (state.locks); siblings that took a character make it a little less attractive. */
+export function autoPick(chars: readonly Traited[], agent: RoleAgent, state: AutoState): AutoPick | null {
+  if (chars.length === 0) return null
+  const key = String(agent.id)
+  const had = state.locks.get(key)
+  if (had && chars.some(c => c.id === had.id)) return had
+  const role = roleOf(agent)
+  const parent = agent.parentId != null ? String(agent.parentId) : ''
+  const taken: Record<string, number> = {}
+  state.locks.forEach((v, k) => {
+    if (k !== key && v.parent === parent) taken[v.id] = (taken[v.id] ?? 0) + 1
+  })
+  const rows = chars.map(c => {
+    const hit = c.traits.filter(x => (role[x] ?? 0) > 0).sort((x, y) => (role[y] ?? 0) - (role[x] ?? 0))
+    return { c, hit, fit: hit.reduce((s, x) => s + (role[x] ?? 0), 0) }
+  })
+  const top = Math.max(...rows.map(r => r.fit))
+  const unit = top > 0 ? 0.2 * top : W_REPEAT
+  let best: { id: string; why: string[]; score: number; tie: number } | null = null
+  for (const { c, hit, fit } of rows) {
+    const score = fit - unit * (taken[c.id] ?? 0)
+    const tie = hash32(`${key}|${c.id}`)
+    if (!best || score > best.score + 1e-9 || (Math.abs(score - best.score) <= 1e-9 && tie < best.tie)) best = { id: c.id, why: hit.slice(0, 3), score, tie }
+  }
+  const pick = { id: best!.id, why: best!.why, parent }
+  state.locks.set(key, pick)
+  return pick
+}
+
+/** The agents of a snapshot file (data.js / sessions/<id>.js); [] when the text is missing or not a snapshot. */
+export function agentsFromDataJs(text: string | null | undefined): RoleAgent[] {
+  const mark = '&& window.__crewUpdate('
+  const at = typeof text === 'string' ? text.indexOf(mark) : -1
+  if (!text || at < 0) return []
+  try {
+    const snap = JSON.parse(text.slice(at + mark.length, text.lastIndexOf(')'))) as { agents?: unknown }
+    if (!Array.isArray(snap.agents)) return []
+    return snap.agents
+      .filter((a): a is Record<string, unknown> => !!a && typeof a === 'object' && typeof (a as { id?: unknown }).id === 'string')
+      .map(a => ({
+        id: String(a.id),
+        type: typeof a.type === 'string' ? a.type : '',
+        description: typeof a.description === 'string' ? a.description : '',
+        verb: typeof a.verb === 'string' ? a.verb : '',
+        isArchitect: a.isArchitect === true,
+        parentId: typeof a.parentId === 'string' ? a.parentId : null,
+      }))
+  } catch {
+    return []
+  }
+}
+
+/** What `auto` would give each agent of the latest snapshot, with the reason (the pet keeps the first pick it made for an agent). */
+export function describeAgentPicks(agents: readonly RoleAgent[], chars: readonly Traited[]): string[] {
+  if (agents.length === 0) return []
+  const state: AutoState = { locks: new Map() }
+  const lines = ['Auto-match for the agents of the latest snapshot (the pet keeps the first pick it made):']
+  for (const a of agents) {
+    const p = autoPick(chars, a, state)
+    if (!p) continue
+    const label = a.id === 'main' ? 'main' : a.type || a.id
+    lines.push(`  ${label}${a.description && a.id !== 'main' ? ` (${a.description.slice(0, 40)})` : ''} -> ${p.id}${p.why.length ? ` (matched: ${p.why.join(', ')})` : ' (no trait fits: a stable pick)'}`)
+  }
+  return lines
+}
+
+/** What the pet's own settings file says about characters, for `/crew characters`; tolerant of a missing or broken file. */
+export function describePetSettings(raw: string | null | undefined): string[] {
+  if (raw == null) {
+    return ["Pet settings: none yet. The pet's Settings window (tray icon or right-click menu: Settings...) sets a default, a character per agent type, or one agent; it wins over the option."]
+  }
+  let j: unknown
+  try {
+    j = JSON.parse(raw.replace(/^\uFEFF/, ''))
+  } catch {
+    return ["Pet settings: overlay/pet-settings.json is not valid JSON, so the pet ignores it (it writes a fresh one when you change a setting in the pet's Settings window)."]
+  }
+  const o = (j && typeof j === 'object' ? j : {}) as { default?: unknown; types?: unknown; agents?: unknown }
+  const pairs = (m: unknown): [string, string][] =>
+    m && typeof m === 'object' && !Array.isArray(m) ? Object.entries(m as Record<string, unknown>).filter((e): e is [string, string] => typeof e[1] === 'string') : []
+  const types = pairs(o.types)
+  const agents = pairs(o.agents)
+  const lines = ["Pet settings (overlay/pet-settings.json, set in the pet's Settings window; they win over the option):"]
+  lines.push(`  default: ${typeof o.default === 'string' && o.default ? (o.default === 'auto' ? 'auto (match the role)' : o.default) : 'none (the option, else a crab)'}`)
+  for (const [k, v] of types) lines.push(`  ${k === '*' ? 'any other type (*)' : k} -> ${v}`)
+  if (agents.length > 0) lines.push(`  ${agents.length} agent${agents.length === 1 ? '' : 's'} with a character of their own`)
+  return lines
 }

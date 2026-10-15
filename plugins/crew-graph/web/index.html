@@ -76,6 +76,7 @@ body.collapsed #stage, body.collapsed #grip, body.collapsed #ticker, body.collap
 body.collapsed #plate{top:3px}
 #ticker{position:fixed;left:6px;bottom:6px;z-index:5;display:none;flex-direction:column;gap:2px;max-width:calc(100% - 34px);pointer-events:none}
 body.overlay #ticker{display:flex} body.overlay.noticker #ticker{display:none}
+body.overlay.noplate:not(.collapsed) #plate{display:none !important}
 #ticker div{align-self:flex-start;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;background:rgba(14,16,24,.82);border-radius:8px;padding:1px 7px;font-size:10px;color:#e6e9f2;transition:opacity 1s}
 #ticker div.old{opacity:0}
 </style>
@@ -142,6 +143,7 @@ body.overlay #ticker{display:flex} body.overlay.noticker #ticker{display:none}
 <script src="characters-core.js"></script>
 <script src="characters.js"></script>
 <script src="characters-user.js"></script>
+<script src="pet-settings-core.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

@@ -18,7 +18,10 @@ type Core = {
   rigOf(n: string): string | null
   matchRig(names: string[]): { bones: Record<string, string>; variants: Record<string, Record<string, string>> }
   parseRules(s: unknown): [string, string][]
-  chooseCharacter(rules: [string, string][], agent: { id: string; type?: string; isArchitect?: boolean }, ids: string[]): string | null
+  chooseCharacter(rules: [string, string][], agent: { id: string; type?: string; isArchitect?: boolean }, ids: string[], auto?: (a: unknown) => { id: string } | null): string | null
+  roleOf(agent: unknown): Record<string, number>
+  autoPick(chars: { id: string; traits: string[] }[], agent: unknown, state: { locks: Map<string, { id: string; why: string[]; parent: string }> }): { id: string; why: string[]; parent: string } | null
+  traitsOf(list: unknown): string[]
   normalizeDef(d: unknown): { def: null | { id: string; bones: Record<string, Bone>; eyes: Record<string, unknown[]>; scale: number }; warnings: string[] }
 }
 const core = (globalThis as unknown as { CrewCharCore: Core }).CrewCharCore
@@ -33,13 +36,36 @@ test('the characters option reads who=character pairs, leniently', () => {
     ['sonnet-coder', 'robot'],
     ['*', 'random'],
   ])
+  // a part without "=" is `*=<it>`; `=x` and `y=` are still dropped; `auto` is its own thing, not `random`
   expect(parseCharacterRules('  a = b ,junk, =x, y=, z=AUTO ')).toEqual([
     ['a', 'b'],
-    ['z', 'random'],
+    ['*', 'junk'],
+    ['z', 'auto'],
   ])
   expect(parseCharacterRules('')).toEqual([])
   expect(parseCharacterRules(42)).toEqual([])
   expect(parseCharacterRules(Array.from({ length: 200 }, (_, i) => `a${i}=crab`).join(',')).length).toBe(64)
+})
+
+test('a part without "=" means "*=": random, bunny, auto and "main=crab, random" all work', () => {
+  expect(parseCharacterRules('random')).toEqual([['*', 'random']])
+  expect(parseCharacterRules('bunny')).toEqual([['*', 'bunny']])
+  expect(parseCharacterRules('main=crab, random')).toEqual([
+    ['main', 'crab'],
+    ['*', 'random'],
+  ])
+  expect(parseCharacterRules('auto')).toEqual([['*', 'auto']])
+  expect(parseCharacterRules('Explore=cat; auto\nmain=crab')).toEqual([
+    ['Explore', 'cat'],
+    ['*', 'auto'],
+    ['main', 'crab'],
+  ])
+  expect(parseCharacterRules(' , ;; ')).toEqual([])
+  // and the first rule that matches wins: `main=crab, random` keeps the crab for main, the rest are a stable pick
+  const ids = ['crab', 'bunny', 'cat']
+  expect(core.chooseCharacter(core.parseRules('main=crab, random'), { id: 'main', type: 'main' }, ids)).toBe('crab')
+  expect(core.chooseCharacter(core.parseRules('random'), { id: 'a7', type: 't' }, ids)).toBe(ids[core.hash('a7') % ids.length])
+  expect(core.chooseCharacter(core.parseRules('bunny'), { id: 'a7', type: 't' }, ids)).toBe('bunny')
 })
 
 test('parseConfig carries the option as text and as rules; empty means all crabs', () => {
@@ -55,7 +81,8 @@ test('parseConfig carries the option as text and as rules; empty means all crabs
 })
 
 test('the viewer reads the option exactly as the mod does', () => {
-  for (const s of ['main=crab, Explore=bunny; *=random', ' a = b ,junk, =x, y=, z=AUTO ', '', 'x==y', 'a=b,\n\nc=d']) expect(core.parseRules(s)).toEqual(parseCharacterRules(s))
+  for (const s of ['main=crab, Explore=bunny; *=random', ' a = b ,junk, =x, y=, z=AUTO ', '', 'x==y', 'a=b,\n\nc=d', 'random', 'bunny', 'main=crab, random', 'auto', 'Explore=AUTO; x', ' , ;; ', 'a=b,auto,c=d,RANDOM'])
+    expect(core.parseRules(s)).toEqual(parseCharacterRules(s))
 })
 
 test('the snapshot carries the parsed rules only when there are some', () => {
@@ -131,6 +158,7 @@ test('GLB node names are matched to the rig, case and separators ignored', () =>
 test('the built-in characters are the ones the mod lists, all valid, all on the rig', () => {
   expect(builtin.map(c => c.id)).toEqual(BUILTIN_CHARACTERS.map(c => c.id))
   expect(builtin.map(c => c.name)).toEqual(BUILTIN_CHARACTERS.map(c => c.name))
+  expect(builtin.map(c => (c as unknown as { traits: string[] }).traits)).toEqual(BUILTIN_CHARACTERS.map(c => [...c.traits]))
   expect(builtin.length).toBeGreaterThanOrEqual(4)
   for (const raw of builtin) {
     const r = core.normalizeDef(raw)
@@ -292,12 +320,13 @@ test('/crew characters tells what is there and how the option is read', async ()
   const scan = await scanCharacters(fs, 'C:/u/characters', false)
   const spec = 'main=crab, Explore=mine, sonnet-coder=ghost, *=random'
   const text = describeCharacters(scan, spec, 'C:/u/characters', parseCharacterRules(spec), false)
-  expect(text).toContain('Built-in: crab (Clawd crab), bunny')
+  expect(text).toContain('Built-in: crab (Clawd crab: lead, main, generalist); bunny')
   expect(text).toContain('mine  voxel  mine.json')
   expect(text).toContain('x  glb    x.glb')
   expect(text).toContain('Explore -> mine')
   expect(text).toContain('sonnet-coder -> ghost (not found: a crab)')
   expect(text).toContain('* -> a stable pick by agent id')
+  expect(describeCharacters(scan, 'auto', 'C:/u/characters', parseCharacterRules('auto'), false)).toContain("* -> the character whose traits fit the agent's role")
   expect(text).toContain('/crew characters reload rescans')
   expect(describeCharacters({ chars: [], notes: [], rev: '0' }, '', 'C:/u/characters', [], true)).toContain('every agent is a crab')
   // the README the mod puts in the folder names the pieces a pack needs

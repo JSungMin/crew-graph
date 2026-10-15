@@ -131,24 +131,28 @@ const safeRegExp = (source: string, fallback: string) => {
   }
 }
 
-/** One `who=character` rule of the `characters` option. `character` is a character id or `random` (a stable pick by hash of the agent id). */
+/**
+ * One `who=character` rule of the `characters` option. `character` is a character id, `random` (a stable pick by hash of the agent id)
+ * or `auto` (the character whose traits fit the agent's role best).
+ */
 export type CharacterRule = [who: string, character: string]
 
 /**
  * "main=crab, Explore=bunny; sonnet-coder=robot, *=random" -> [['main','crab'], ['Explore','bunny'], ['sonnet-coder','robot'], ['*','random']].
- * Parts are split by `,` `;` or a line break; one without `=` or with an empty side is dropped; `auto` means `random`. The viewer
- * (web/characters-core.js) reads the same text the same way; a test holds the two together.
+ * Parts are split by `,` `;` or a line break. A part without `=` is `*=<it>`, so `random`, `auto` or `bunny` alone work, and so does
+ * `main=crab, random`; one with an empty side (`=x`, `y=`) is dropped. `random` and `auto` are kept apart (they are not the same).
+ * The viewer (web/characters-core.js) reads the same text the same way; a test holds the two together.
  */
 export const parseCharacterRules = (spec: unknown): CharacterRule[] => {
   const out: CharacterRule[] = []
   if (typeof spec !== 'string') return out
   for (const part of spec.split(/[,;\n]+/)) {
     const i = part.indexOf('=')
-    if (i < 1) continue
-    const who = part.slice(0, i).trim()
-    const ch = part.slice(i + 1).trim()
+    if (i === 0) continue
+    const who = i < 0 ? '*' : part.slice(0, i).trim()
+    const ch = (i < 0 ? part : part.slice(i + 1)).trim()
     if (!who || !ch || who.length > 80 || ch.length > 80) continue
-    out.push([who, /^(random|auto)$/i.test(ch) ? 'random' : ch])
+    out.push([who, /^random$/i.test(ch) ? 'random' : /^auto$/i.test(ch) ? 'auto' : ch])
   }
   return out.slice(0, 64)
 }

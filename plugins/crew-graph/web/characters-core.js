@@ -52,15 +52,17 @@ function matchRig(names) {
 }
 
 /* ---------------------------------------------------------------- assignment: "main=crab, Explore=bunny, *=random" */
+/* A part without "=" is `*=<it>`: "random", "auto" or "bunny" alone work, and so does "main=crab, random".
+   `random` is a stable pick by hash of the agent id, `auto` matches the agent's role to a character's traits. */
 function parseRules(spec) {
   const out = [];
   if (typeof spec !== 'string') return out;
   for (const part of spec.split(/[,;\n]+/)) {
     const i = part.indexOf('=');
-    if (i < 1) continue;
-    const key = part.slice(0, i).trim(), val = part.slice(i + 1).trim();
+    if (i === 0) continue;
+    const key = i < 0 ? '*' : part.slice(0, i).trim(), val = (i < 0 ? part : part.slice(i + 1)).trim();
     if (!key || !val || key.length > 80 || val.length > 80) continue;
-    out.push([key, /^(random|auto)$/i.test(val) ? 'random' : val]);
+    out.push([key, /^random$/i.test(val) ? 'random' : /^auto$/i.test(val) ? 'auto' : val]);
   }
   return out.slice(0, 64);
 }
@@ -72,20 +74,104 @@ function ruleMatches(key, agent) {
   if (k.charAt(k.length - 1) === '*') { const p = k.slice(0, -1); return names.some((n) => n.startsWith(p)); }
   return names.indexOf(k) >= 0;
 }
-/* agent + rules + the available character ids -> a character id. No rules at all: the first (the crab). */
-function chooseCharacter(rules, agent, ids) {
+/* agent + rules + the available character ids -> a character id. No rules at all: the first (the crab).
+   `auto` (optional): agent -> { id, why } for the rules that say `auto`; without it `auto` is a stable pick like `random`. */
+function chooseCharacter(rules, agent, ids, auto) {
   if (!ids.length) return null;
   const find = (v) => ids.find((x) => x.toLowerCase() === String(v).toLowerCase());
   if (!rules || !rules.length) return ids[0];
   for (const r of rules) {
     if (!ruleMatches(r[0], agent)) continue;
-    if (r[1] === 'random') break;
+    if (r[1] === 'auto' && auto) { const a = auto(agent); if (a && a.id) return a.id; }
+    if (r[1] === 'random' || r[1] === 'auto') break;
     return find(r[1]) || ids[0]; // a name nobody has (a pack not loaded): the crab
   }
   return ids[hash(agent && agent.id != null ? agent.id : '') % ids.length];
 }
 
+/* ---------------------------------------------------------------- roles and traits: `auto` */
+// A character may declare traits (role words: "code", "explore", "docs", ...). An agent's role is read from its type, its task text and
+// the verb it is doing; `auto` picks the character whose traits overlap the role most. Small, fixed tables: the same input gives the same
+// pick everywhere (the mod's /crew characters has a twin of this in hooks/characters.ts, held to it by a test).
+const TYPE_ROLES = [ // the first entry that matches the agent's type decides it
+  [/plan|architect|advisor|design|strateg/, ['plan', 'architect', 'design', 'think', 'advisor']],
+  [/explor|search|locat|scout|find|investig|research|survey/, ['explore', 'search', 'investigate', 'locate']],
+  [/review|audit|critic|verif|inspect|lint/, ['review', 'investigate']],
+  [/doc|writer|write|summar|readme|wiki|translat|scribe|changelog/, ['docs', 'write', 'summarize']],
+  [/web|fetch|browse|crawl|scrape/, ['web', 'quick']],
+  [/cod(e|er|ing)|implement|build|develop|\bdev\b|engineer|fix|debug|refactor|test|tdd|resolver/, ['code', 'build', 'fix', 'test', 'implement']],
+  [/quick|fast|haiku|mini|lite/, ['quick']],
+  [/general|purpose|orchestr|coordinat|manager|lead/, ['generalist', 'lead']],
+];
+const TEXT_ROLES = [ // every entry that matches the task text adds its words
+  [/\b(implement\w*|code|coding|refactor\w*|build|compile|migrat\w*)\b|구현|코드/, ['code', 'build', 'implement']],
+  [/\b(fix\w*|bugs?|debug\w*|patch\w*|repair\w*)\b|수정|버그/, ['fix', 'code']],
+  [/\b(tests?|testing|specs?)\b|테스트/, ['test']],
+  [/\b(run|execute|npm|script)\b|실행/, ['run']],
+  [/\b(review\w*|audit\w*|critique|verify|check\w*)\b|리뷰|검토/, ['review']],
+  [/\b(search\w*|find|locate|grep|look ?up|map|trace|survey)\b|검색|탐색|찾/, ['search', 'locate', 'explore']],
+  [/\b(investigat\w*|analy[sz]\w*|research\w*|explor\w*|explain\w*)\b|조사|분석/, ['investigate', 'explore']],
+  [/\b(docs?|document\w*|readme|write|writing|changelog|guide|translat\w*)\b|문서|작성/, ['docs', 'write']],
+  [/\b(summari[sz]\w*|summary|tl;?dr)\b|요약/, ['summarize']],
+  [/\b(web|fetch|url|https?|browse)\b/, ['web']],
+  [/\b(plan\w*|design\w*|architect\w*|strategy|propose)\b|계획|설계/, ['plan', 'design']],
+];
+const VERB_ROLES = { edit: ['code', 'fix', 'implement'], run: ['run', 'build', 'test'], read: ['explore', 'search'], search: ['search', 'explore', 'locate'], web: ['web'], plan: ['plan', 'design'], think: ['think'], spawn: ['lead'] };
+const W_TYPE = 3, W_TEXT = 1.2, W_VERB = 0.8, W_REPEAT = 0.75;
+
+/* agent { id, type, description, verb, isArchitect } -> { word: weight } */
+function roleOf(agent) {
+  const w = {}, add = (words, k) => words.forEach((x) => { w[x] = (w[x] || 0) + k; });
+  if (!agent) return w;
+  const type = String(agent.type == null ? '' : agent.type).toLowerCase();
+  if (agent.id === 'main' || type === 'main') add(['lead', 'main', 'generalist'], W_TYPE);
+  if (agent.isArchitect) add(['architect', 'plan', 'design', 'think', 'advisor'], W_TYPE);
+  for (const r of TYPE_ROLES) if (r[0].test(type)) { add(r[1], W_TYPE); break; }
+  const text = String(agent.description == null ? '' : agent.description).toLowerCase().slice(0, 300);
+  for (const r of TEXT_ROLES) if (r[0].test(text)) add(r[1], W_TEXT);
+  if (VERB_ROLES[agent.verb]) add(VERB_ROLES[agent.verb], W_VERB);
+  return w;
+}
+/* The best character for the role. chars: [{ id, traits: [word] }]; state.locks: Map agentId -> { id, why, parent } (the first pick
+   of an agent stays, so a changing verb mix does not flip it). Siblings (same parent) that already took a character make it a
+   little less attractive: equally good alternatives spread out. Ties: a stable hash of the agent id and the character id. */
+function autoPick(chars, agent, state) {
+  if (!chars || !chars.length) return null;
+  const key = String(agent && agent.id), locks = state.locks;
+  const had = locks.get(key);
+  if (had && chars.some((c) => c.id === had.id)) return had;
+  const role = roleOf(agent), parent = agent && agent.parentId != null ? String(agent.parentId) : '';
+  const taken = {};
+  locks.forEach((v, k) => { if (k !== key && v.parent === parent) taken[v.id] = (taken[v.id] || 0) + 1; });
+  const rows = chars.map((c) => {
+    const hit = (Array.isArray(c.traits) ? c.traits : []).filter((x) => role[x] > 0).sort((x, y) => role[y] - role[x]);
+    return { c, hit, fit: hit.reduce((s, x) => s + role[x], 0) };
+  });
+  // a repeat costs a fifth of the best fit on offer (a flat bit when nobody fits): a lone good match is kept, a near one takes over
+  const unit = Math.max(...rows.map((r) => r.fit)) > 0 ? 0.2 * Math.max(...rows.map((r) => r.fit)) : W_REPEAT;
+  let best = null;
+  for (const { c, hit, fit } of rows) {
+    const score = fit - unit * (taken[c.id] || 0);
+    const tie = hash(key + '|' + c.id);
+    if (!best || score > best.score + 1e-9 || (Math.abs(score - best.score) <= 1e-9 && tie < best.tie)) best = { id: c.id, why: hit.slice(0, 3), score, tie };
+  }
+  const pick = { id: best.id, why: best.why, parent };
+  locks.set(key, pick);
+  return pick;
+}
+
 /* ---------------------------------------------------------------- voxel character check */
+/* "traits": ["Code", "test", ...] -> lower-case words, at most 16 of 1-24 letters, digits, - _ */
+function traitsOf(list) {
+  if (!Array.isArray(list)) return [];
+  const out = [];
+  for (const x of list) {
+    const w = typeof x === 'string' ? x.trim().toLowerCase() : '';
+    if (/^[a-z0-9_-]{1,24}$/.test(w) && out.indexOf(w) < 0) out.push(w);
+    if (out.length >= 16) break;
+  }
+  return out;
+}
 const isNum = (x) => typeof x === 'number' && isFinite(x);
 function vec(a, n, d, lim) {
   if (!Array.isArray(a) || a.length < n) return d.slice();
@@ -117,6 +203,7 @@ function normalizeDef(def) {
     out.base = { h: def.base.h, s: isNum(def.base.s) ? Math.max(0, Math.min(1, def.base.s)) : 0.6, l: isNum(def.base.l) ? Math.max(0, Math.min(1, def.base.l)) : 0.55, spread: isNum(def.base.spread) ? Math.max(0, Math.min(60, Math.round(def.base.spread))) : 0 };
   }
   if (isNum(def.travel)) out.travel = Math.max(0, Math.min(3, def.travel));
+  out.traits = traitsOf(def.traits);
   let total = 0;
   const take = (name, src, mirrored) => {
     const parent = typeof src.parent === 'string' && RIG.indexOf(src.parent) >= 0 ? (mirrored ? swapLR(src.parent) : src.parent) : null;
@@ -168,5 +255,5 @@ function normalizeDef(def) {
   return { def: out, warnings: warn };
 }
 
-return { RIG, EYE_VARIANTS, CHAR_ID, hash, normName, rigOf, matchRig, parseRules, ruleMatches, chooseCharacter, normalizeDef, swapLR };
+return { RIG, EYE_VARIANTS, CHAR_ID, hash, normName, rigOf, matchRig, parseRules, ruleMatches, chooseCharacter, roleOf, autoPick, traitsOf, normalizeDef, swapLR };
 });
