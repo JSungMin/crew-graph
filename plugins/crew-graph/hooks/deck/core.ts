@@ -114,6 +114,8 @@ export type Config = {
   /** crew-graph: the in-pane 3D view's frame rate and height in rows. */
   view3dFps: number
   view3dRows: number
+  view3dColumns: number
+  view3dMode: 'auto' | 'cells' | 'image'
 }
 
 const safeRegExp = (source: string, fallback: string) => {
@@ -148,8 +150,10 @@ export const parseConfig = (o: Readonly<Record<string, unknown>>): Config => {
     openOnStart: bool('openOnStart', true),
     statusLine: bool('statusLine', true),
     webOnStart: bool('webOnStart', false),
-    view3dFps: typeof o.view3dFps === 'number' ? Math.min(20, Math.max(1, Math.round(o.view3dFps))) : 8,
-    view3dRows: typeof o.view3dRows === 'number' ? Math.min(60, Math.max(8, Math.round(o.view3dRows))) : 20,
+    view3dFps: typeof o.view3dFps === 'number' ? Math.min(20, Math.max(1, Math.round(o.view3dFps))) : 10,
+    view3dRows: typeof o.view3dRows === 'number' ? Math.min(60, Math.max(8, Math.round(o.view3dRows))) : 28,
+    view3dColumns: typeof o.view3dColumns === 'number' ? Math.min(240, Math.max(40, Math.round(o.view3dColumns))) : 110,
+    view3dMode: o.view3dMode === 'cells' || o.view3dMode === 'image' ? o.view3dMode : 'auto',
   }
 }
 

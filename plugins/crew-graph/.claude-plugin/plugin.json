@@ -1,6 +1,6 @@
 {
   "name": "crew-graph",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Live agent dashboard with Clawd crabs: model vitals, permission gate, architect, subagent cards, the agent tree and plan/doc graph, and a three.js 3D view of agents interacting, in the pane (/crew 3d) or the browser (/crew web). Absorbs Flightdeck",
   "types": "./types/index.d.ts",
   "author": {
@@ -116,15 +116,32 @@
     },
     "view3dFps": {
       "title": "3D view frame rate",
-      "description": "Frames per second of the in-pane 3D view (/crew 3d), 1-20",
+      "description": "Frames per second of the in-pane 3D view while you interact with it (1-20); idle it drops to 4",
       "type": "number",
-      "default": 8
+      "default": 10
     },
     "view3dRows": {
       "title": "3D view height",
-      "description": "Rows the in-pane 3D view takes (/crew 3d), 8-60",
+      "description": "Rows the in-pane 3D view takes (8-60)",
       "type": "number",
-      "default": 20
+      "default": 28
+    },
+    "view3dColumns": {
+      "title": "3D view pane width",
+      "description": "Columns the pane asks for when /crew 3d opens it (40-240)",
+      "type": "number",
+      "default": 110
+    },
+    "view3dMode": {
+      "title": "3D view drawing",
+      "description": "auto: real pixels on kitty/Ghostty, colour blocks (2x2 pixels a cell) elsewhere",
+      "type": "string",
+      "options": [
+        "auto",
+        "cells",
+        "image"
+      ],
+      "default": "auto"
     }
   }
 }

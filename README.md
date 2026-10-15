@@ -54,11 +54,23 @@ The crabs animate on the surface's own frame clock, so the pane does not redraw 
 /crew 3d
 ```
 
-- **How it works:** `bin/crew-3d.mjs` opens the same viewer in a headless Chrome or Edge. It shrinks each frame to the pane's size and streams it as Raster cells. The mod blits each frame in place, about 8 frames a second (`view3dFps`), in a panel `view3dRows` rows tall (default 20). Labels are dropped and the camera frames tighter, because a cell holds only two pixels.
-- **Size and teardown:** when the pane width changes, the renderer restarts at the new size. When the pane is closed for about 5 s, or on `/crew 3d off`, the browser is stopped.
+The three.js view runs inside the Crew pane, and you can touch it.
+
+| Do | What happens |
+| --- | --- |
+| Drag empty space | Rotate the camera (right-drag or shift-drag pans) |
+| Wheel over the view | Zoom (the pane does not scroll) |
+| Click a crab | **Pinch** it: it squashes, hops, squints `> <` and pops a red `!`. Three pinches in 2 s and it pinches back, red and grumpy. |
+| Stroke a crab | **Pet** it, by dragging from the crab or hovering back and forth: `^ ^` eyes, a purring wiggle, rising hearts and a happy hop |
+
+- **How it draws:** `bin/crew-3d.mjs` opens the viewer (`index.html?embed`) in a headless Chrome or Edge and streams each frame into the pane, in one of two modes:
+  - **Colour blocks:** in any truecolour terminal, quadrant block glyphs give 2x2 pixels a cell, with each cell's best two colours (220x56 pixels at 110x28 cells).
+  - **Real pixels:** on kitty and Ghostty, an `Image` frame (`view3dMode: auto|cells|image`).
+- **How input works:** an input layer (a `Client` region over the picture) catches the pointer. The mod forwards it to the helper on `127.0.0.1`, authenticated by a token, and the helper replays it as DOM pointer and wheel events in the page.
+- **Cost:** the browser renders on the CPU (SwiftShader), so the view renders only when a frame is grabbed. That is `view3dFps` (default 10) for 3 s after input and 4 fps when idle, at 4x8 CSS pixels a cell, with no MSAA.
+- **Size and teardown:** `/crew 3d` asks the pane for `view3dColumns` (default 110) columns, and the view is `view3dRows` (default 28) rows tall. When the pane width changes, the renderer restarts at the new size. When the pane stays closed for about 5 s, or on `/crew 3d off`, the browser is stopped.
 - **Needs:** Node 22+ on `PATH`, and Chrome, Edge or Chromium (or `CREW_CHROME=<path>`).
-- **Isolation:** the browser runs headless with a throwaway profile, over `--remote-debugging-pipe`. It opens no port, and it exits when the renderer process does.
-- **Where it shows:** terminal only (Raster). In the desktop app, use `/crew web`.
+- **Isolation:** the browser runs headless with a throwaway profile, over `--remote-debugging-pipe`, and exits when the helper does.
 
 ## 3D web view
 
@@ -68,7 +80,7 @@ The crabs animate on the surface's own frame clock, so the pane does not redraw 
 
 This copies the viewer to `~/.claude/crew-graph/` and opens `index.html` in your browser. While work runs, the mod rewrites `data.js` there at most every 450 ms. The page reloads it by script-tag injection, so it works from `file://` with no server and no network.
 
-- Every agent is a voxel Clawd that poses like its terminal twin. Agents are laid out as a tree with main at the root.
+- Every agent is a voxel Clawd that poses like its terminal twin. Agents are laid out as a tree with main at the root. Pinch it by clicking it, and pet it by stroking it.
 - Plans, docs and code float beside the agents that touched them. Read edges are blue, write edges orange.
 - Every interaction is a particle: spawn travels parent→child, an answer child→parent, a read file→agent, a write agent→file, and a denial or failure is a red burst.
 - The HUD shows the session vitals, the gate counters, the turn receipt and a live event log. Click a crab for its details.
@@ -110,7 +122,7 @@ Focus the pane with `ctrl+x tab`:
 
 All of Flightdeck's options apply. Set them in `/config` or under `pluginConfigs["crew-graph"].options`:
 - `architectPattern`, `architectLabel`, `gateLabel`, `panels`, `motion`, `moments`, `matchDescriptions`, `maxCards`, `layout`, `palette`, `openOnStart`, `statusLine`
-- `webOnStart`, `view3dFps` and `view3dRows` (crew-graph only)
+- `webOnStart`, `view3dFps`, `view3dRows`, `view3dColumns` and `view3dMode` (crew-graph only)
 
 The default `panels` value is `3d,main,crew,architect,gate,agents,loops,receipt,log`. The 3d panel shows only while `/crew 3d` runs.
 
@@ -118,7 +130,7 @@ The default `panels` value is `3d,main,crew,architect,gate,agents,loops,receipt,
 
 The mod only watches: every hook passes its event on unchanged, and a hook that throws passes the event on. It does reach outside the session in three places:
 - **Files:** it writes files only under `~/.claude/crew-graph/`, and only after `/crew web` (or `webOnStart`).
-- **Processes:** it starts the OS "open" command (`explorer`, `open` or `xdg-open`) when `/crew web` opens the page. With `/crew 3d` it also starts `node bin/crew-3d.mjs`, which starts a headless browser.
+- **Processes:** it starts the OS "open" command (`explorer`, `open` or `xdg-open`) when `/crew web` opens the page. With `/crew 3d` it also starts `node bin/crew-3d.mjs`, which starts a headless browser and listens on 127.0.0.1 (token-protected) for the pane's pointer input.
 - **Network:** none. three.js r158 is bundled in `web/three.min.js` (MIT).
 
 What it keeps:

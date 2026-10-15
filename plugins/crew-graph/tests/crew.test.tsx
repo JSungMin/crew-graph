@@ -2,6 +2,7 @@ import type { On } from 'claude-code'
 import { expect, mock, test } from 'claude-code/testing'
 
 import { bigFrame, miniFrame } from '../hooks/clawd'
+import { toEvent } from '../hooks/input3d'
 import { clip, describeCall, kindOf, pushEvent, snapshotOf, touchFile } from '../hooks/crew'
 import { DEFAULT_ARCHITECT, DEFAULT_GATE, DEFAULT_MAIN, DEFAULT_TURN, DEFAULT_USAGE, normalizeCard } from '../hooks/deck/core'
 
@@ -211,4 +212,20 @@ test('/crew 3d streams the renderer frames into the pane raster', async ($, on) 
   expect(spawned.join(' ')).toContain('--cols 20')
   expect(blits.length).toBe(2)
   expect(blits[0]).toEqual({ key: 'crew3d', columns: 20, rows: 8 })
+})
+
+test('pane pointer events become view fractions for the renderer', () => {
+  expect(toEvent({ type: 'down', x: 9, y: 4, button: 'left' }, 20, 10)).toEqual({
+    kind: 'down',
+    button: 'left',
+    x: 0.475,
+    y: 0.45,
+    shift: undefined,
+    alt: undefined,
+    ctrl: undefined,
+  })
+  // Fine positions win where the terminal reports pixels; the edges clamp.
+  expect(toEvent({ type: 'move', x: 0, y: 0, fine: { x: 5, y: 2.5 } }, 20, 10)).toMatchObject({ kind: 'move', x: 0.25, y: 0.25 })
+  expect(toEvent({ type: 'enter', x: 40, y: 0 }, 20, 10)).toMatchObject({ kind: 'move', x: 1 })
+  expect(toEvent({ type: 'leave', x: 3, y: 3, shift: true }, 20, 10)).toMatchObject({ kind: 'leave', shift: true })
 })

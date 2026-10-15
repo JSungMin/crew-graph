@@ -356,6 +356,11 @@ const RASTER_KEY = 'crew3d'
 const VIEW3D_OFF: View3d = { isOn: false, cols: 0, rows: 0, status: '' }
 let view3dGen = 0
 let last3d: { cols: number; rows: number; cells: string } | null = null
+let lastImage: { path: string; width: number; height: number; gen: number } | null = null
+let helper: { port: number; token: string } | null = null
+let pointerIn3d = false
+let pointerAt = { x: 0.5, y: 0.5 }
+let mode3d: 'cells' | 'image' = 'cells'
 let isRestarting3d = false
 
 async function getView3d($: EngineInterface): Promise<View3d> {
@@ -395,34 +400,61 @@ function blankCells(cols: number, rows: number): string {
   return blankCache.cells
 }
 
-async function start3d($: EngineInterface, cols: number, rows: number, fps: number): Promise<string> {
+/** Pixels where the terminal draws them (kitty, Ghostty); colour cells everywhere else. */
+async function pickMode($: EngineInterface, want: string): Promise<'cells' | 'image'> {
+  if (want === 'cells' || want === 'image') return want
+  const [term, prog, kitty, ghostty] = await Promise.all([
+    $.env.get('TERM'),
+    $.env.get('TERM_PROGRAM'),
+    $.env.get('KITTY_WINDOW_ID'),
+    $.env.get('GHOSTTY_RESOURCES_DIR'),
+  ])
+  const isPixel = /kitty/i.test(term ?? '') || /ghostty|kitty/i.test(prog ?? '') || Boolean(kitty) || Boolean(ghostty)
+  return isPixel ? 'image' : 'cells'
+}
+
+async function start3d($: EngineInterface, cols: number, rows: number, fps: number, want = 'auto'): Promise<string> {
   const started = await startWeb($, false)
   const w = await getWeb($)
   if (!w.isOn || !w.dir) return started
+  mode3d = await pickMode($, want)
   view3dGen += 1
   const gen = view3dGen
   last3d = null
+  lastImage = null
+  helper = null
   await update($, view3d, () => ({ isOn: true, cols, rows, status: 'starting the renderer…' }))
   void run3d($, gen, cols, rows, fps, w.dir)
-  return `Crew 3D view: ${cols}x${rows} cells in the pane (headless browser, ${fps} fps).`
+  return `Crew 3D view: ${cols}x${rows} cells in the pane, ${mode3d === 'image' ? 'pixels' : 'colour blocks (2x2 pixels a cell)'}, ${fps} fps. Drag to rotate, wheel to zoom, click a crab to pinch it, stroke it to pet it.`
 }
 
 async function stop3d($: EngineInterface, status = '') {
   view3dGen += 1
   last3d = null
+  lastImage = null
+  helper = null
+  pointerIn3d = false
   await update($, view3d, () => ({ ...VIEW3D_OFF, status }))
 }
 
-async function restart3d($: EngineInterface, cols: number, rows: number, fps: number) {
+async function restart3d($: EngineInterface, cols: number, rows: number, fps: number, want: string) {
   isRestarting3d = false
-  if ((await getView3d($)).isOn) await start3d($, cols, rows, fps)
+  if ((await getView3d($)).isOn) await start3d($, cols, rows, fps, want)
+}
+
+/** The pane's pointer events, forwarded to the renderer's page. */
+async function sendInput($: EngineInterface, events: unknown[]) {
+  if (!helper || events.length === 0) return
+  await $.http
+    .fetch(`http://127.0.0.1:${helper.port}/input?t=${helper.token}`, { method: 'POST', body: JSON.stringify({ events }) })
+    .catch(() => undefined)
 }
 
 async function run3d($: EngineInterface, gen: number, cols: number, rows: number, fps: number, dir: string) {
   const page = `file:///${dir.replace(/^\/+/, '')}/index.html`
-  const child = $.process.spawn({
-    argv: ['node', `${$.plugin.root}/bin/crew-3d.mjs`, '--page', page, '--cols', String(cols), '--rows', String(rows), '--fps', String(fps)],
-  })
+  const argv = ['node', `${$.plugin.root}/bin/crew-3d.mjs`, '--page', page, '--cols', String(cols), '--rows', String(rows), '--fps', String(fps), '--mode', mode3d]
+  if (mode3d === 'image') argv.push('--out', `${dir}/frames`)
+  const child = $.process.spawn({ argv })
   let buf = ''
   let denies = 0
   let isDone = false
@@ -436,10 +468,24 @@ async function run3d($: EngineInterface, gen: number, cols: number, rows: number
         const line = buf.slice(0, at)
         buf = buf.slice(at + 1)
         at = buf.indexOf('\n')
-        if (line.startsWith('C ')) {
-          const [, c = '0', r = '0', cells = ''] = line.split(' ')
-          last3d = { cols: Number(c), rows: Number(r), cells }
-          const res = await $.ui.blit({ requestId: PANE, key: RASTER_KEY, cells, columns: Number(c), rows: Number(r) }).catch(() => ({ deny: 'blit failed' }))
+        if (line.startsWith('P ')) {
+          const [, port = '0', token = ''] = line.split(' ')
+          helper = { port: Number(port), token }
+          continue
+        }
+        if (line.startsWith('C ') || line.startsWith('I ')) {
+          let res: { deny?: string }
+          if (line.startsWith('C ')) {
+            const [, c = '0', r = '0', cells = ''] = line.split(' ')
+            last3d = { cols: Number(c), rows: Number(r), cells }
+            res = await $.ui.blit({ requestId: PANE, key: RASTER_KEY, cells, columns: Number(c), rows: Number(r) }).catch(() => ({ deny: 'blit failed' }))
+          } else {
+            const [, path = '', wd = '0', ht = '0', g = '0'] = line.split(' ')
+            lastImage = { path, width: Number(wd), height: Number(ht), gen: Number(g) }
+            res = await $.ui
+              .blit({ requestId: PANE, key: RASTER_KEY, source: { file: path, format: 'rgb', width: lastImage.width, height: lastImage.height, generation: lastImage.gen } })
+              .catch(() => ({ deny: 'blit failed' }))
+          }
           if ('deny' in res && res.deny !== undefined) {
             denies += 1
             // The pane is closed or the panel hidden for ~5 s: stop the browser.
@@ -509,9 +555,9 @@ export const register: Register = (on, options) => {
         await stop3d($)
         return { text: 'Crew 3D view stopped.' }
       }
-      await openPane($)
-      const cols = Math.max(20, Math.min(160, Number(arg) || PANE_COLUMNS - 2))
-      return { text: await start3d($, cols, cfg.view3dRows, cfg.view3dFps) }
+      await $.ui.open({ id: PANE, title: TITLE, columns: cfg.view3dColumns, rows: 8 }).catch(() => undefined)
+      const cols = Math.max(20, Math.min(240, Number(arg) || cfg.view3dColumns - 2))
+      return { text: await start3d($, cols, cfg.view3dRows, cfg.view3dFps, cfg.view3dMode) }
     }
     if (verb === 'web') {
       if (arg === 'off') {
@@ -836,6 +882,23 @@ export const register: Register = (on, options) => {
     await refreshStatus($, cfg)
     return done
   })
+
+  // The 3D view's input layer posts here; the pointer goes on to the renderer's page.
+  on('ui.message', async ($, e, next) => {
+    if (e.requestId !== PANE || e.element !== 'input3d') return next(e)
+    const data = e.data as { type?: string; inside?: boolean; x?: number; y?: number; events?: unknown[] }
+    if (data?.type === 'hover') pointerIn3d = data.inside === true
+    else if (data?.type === 'at' && typeof data.x === 'number' && typeof data.y === 'number') pointerAt = { x: data.x, y: data.y }
+    else if (data?.type === 'input' && Array.isArray(data.events)) await sendInput($, data.events.slice(0, 200))
+    return {}
+  }).catch(($, e, next) => next(e))
+
+  // The wheel over the 3D view zooms it instead of scrolling the pane.
+  on('ui.scroll', { requestId: PANE }, async ($, e, next) => {
+    if (!pointerIn3d || !helper || e.by === 0 || e.origin.kind !== 'person') return next(e)
+    await sendInput($, [{ kind: 'wheel', x: pointerAt.x, y: pointerAt.y, dy: Math.max(-10, Math.min(10, e.by)) }])
+    return {}
+  }).catch(($, e, next) => next(e))
 
   // ---------------------------------------------------------------- drawing
 
@@ -1336,19 +1399,43 @@ export const register: Register = (on, options) => {
         )
       }
       // A pane that changed width since the renderer started: restart it at the new size.
-      const want = Math.max(20, Math.min(160, w))
+      const want = Math.max(20, Math.min(240, w))
       if (want !== v3.cols && !isRestarting3d) {
         isRestarting3d = true
-        $.clock.after(400, () => void restart3d($, want, v3.rows, cfg.view3dFps))
+        $.clock.after(400, () => void restart3d($, want, v3.rows, cfg.view3dFps, cfg.view3dMode))
       }
-      const cells = last3d && last3d.cols === v3.cols && last3d.rows === v3.rows ? last3d.cells : blankCells(v3.cols, v3.rows)
+      const Image = 'Image' in els ? els.Image : null
+      const picture =
+        mode3d === 'image' && Image && lastImage ? (
+          <Image
+            key={RASTER_KEY}
+            source={{ file: lastImage.path, format: 'rgb', width: lastImage.width, height: lastImage.height, generation: lastImage.gen }}
+            columns={v3.cols}
+            rows={v3.rows}
+            alt="crew 3d view"
+          />
+        ) : (
+          <Raster
+            key={RASTER_KEY}
+            columns={v3.cols}
+            rows={v3.rows}
+            cells={last3d && last3d.cols === v3.cols && last3d.rows === v3.rows ? last3d.cells : blankCells(v3.cols, v3.rows)}
+          />
+        )
       return (
         <Box flexDirection="column" width={w}>
           <Box justifyContent="space-between">
             <Text color={C.main} bold>3d view</Text>
-            <Text dimColor wrap="truncate">{v3.status || `${v3.cols}x${v3.rows} · /crew 3d off`}</Text>
+            <Text dimColor wrap="truncate">{v3.status || 'drag rotate · wheel zoom · click pinch · stroke pet'}</Text>
           </Box>
-          <Raster key={RASTER_KEY} columns={v3.cols} rows={v3.rows} cells={cells} />
+          <Box width={v3.cols} height={v3.rows}>
+            {picture}
+            {hasClient ? (
+              <Box position="absolute" top={0} left={0} width={v3.cols} height={v3.rows}>
+                <els.Client key="input3d" module="./input3d.tsx" width={v3.cols} height={v3.rows} props={{ cols: v3.cols, rows: v3.rows }} />
+              </Box>
+            ) : null}
+          </Box>
         </Box>
       )
     }
