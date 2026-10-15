@@ -4,6 +4,18 @@ A Claude Code **mod** that shows your agent crew at work: a live dashboard pane 
 
 crew-graph absorbs **[Flightdeck](https://github.com/scasella/claude-flightdeck)** by Stephen Casella (MIT): every Flightdeck panel is here, under the `/crew` command. crew-graph adds the Clawd crabs, the agent tree, the plan/doc graph and the web view.
 
+## Screenshots
+
+All of these use the built-in demo data and the original built-in characters.
+
+| Desktop pet (`/crew pet`) | Every session gets its own window |
+| --- | --- |
+| ![The desktop pet: agents as voxel characters with what they are doing, their files and the flow between them, with no background](docs/screenshots/pet.png) | ![Three pet windows, one per session, each with its nameplate; the last one has ended and sleeps](docs/screenshots/sessions.png) |
+| **Built-in characters on one shared rig** | **Settings inside the pet** |
+| ![Crab, bunny, cat, hamster and robot doing think, edit and run](docs/screenshots/characters.png) | ![The pet settings window with character tiles and per-agent-type pickers](docs/screenshots/settings.png) |
+| **Shake the window while carrying one: it gets dizzy** | **The browser view (`/crew web`)** |
+| ![A dizzy bunny with spiral eyes and stars after a shake](docs/screenshots/dizzy.png) | ![The full 3D web view with session vitals, gate counters and the event log](docs/screenshots/web.png) |
+
 ```
 ╭──────────────────────────────────────────────────────────────╮
 │ crew                                  1 running · 3 files    │
