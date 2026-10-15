@@ -174,6 +174,7 @@ test('/crew web copies the viewer and writes data.js for the browser', async ($,
   const { text } = await $.command.run({ command: 'crew', args: 'web noopen' } as never)
   expect(text).toContain('C:/Users/me/.claude/crew-graph/index.html')
   expect([...written.keys()].filter(k => k.endsWith('three.min.js')).length).toBe(1)
+  expect([...written.keys()].filter(k => k.endsWith('view-core.js')).length).toBe(1) // app.js plays its demo and follows a session through it
   // The host hands fs.write the path in the OS's own spelling.
   const data = [...written].find(([k]) => k.replace(/\\/g, '/') === 'C:/Users/me/.claude/crew-graph/data.js')?.[1] ?? ''
   expect(data.startsWith('window.__crewUpdate && window.__crewUpdate(')).toBe(true)

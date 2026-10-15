@@ -194,6 +194,8 @@ function sessionRgb() { const c = new T.Color(); c.setHSL(sessionHue() / 360, 0.
 // or a skinned GLB whose nodes carry those names. All animation below sets bones by name and skips the ones a character lacks.
 const CC = window.CrewCharCore;
 const PC = window.CrewPetCore;
+const VC = window.CrewViewCore;
+const follow = VC.newFollow(); // the browser view: which session it shows (web/view-core.js)
 let PS = PC.sanitize(null);   // the pet settings (overlay/main.js owns them and tells every window); the defaults in a browser
 const autoState = { locks: new Map() }; // `auto`: an agent keeps the character it was first given
 const CHARS = new Map();      // id -> record { id, name, kind: 'voxel' | 'glb', user, def, glb, state, gltf }
@@ -1424,13 +1426,17 @@ function applySnapshot(s, fromDemo) {
   if (!s || typeof s !== 'object') return;
   // The pet re-reads data.js every second whether or not it changed: an unchanged file (same write time) costs nothing.
   if (overlay && !fromDemo && lastSnap && s.now === lastSnap.now && (s.session && s.session.id) === sessionId) return;
+  const sid = s.session && s.session.id;
+  const following = !overlay && !embed && !petSession && !fromDemo;
+  // data.js is whoever wrote last: while another session is the one still moving, this snapshot is not for this page.
+  if (following && !VC.followAccepts(follow, sid, performance.now())) return;
   if (!fromDemo) {
     gotReal = true;
     if (demoOn) { stopDemo(); if (renderer) resetScene(); sessionId = null; }
   }
-  const sid = s.session && s.session.id;
   if (sessionId != null && sid != null && sid !== sessionId && renderer) resetScene();
   if (sid != null) sessionId = sid;
+  if (following) VC.followNote(follow, sid, s.now, performance.now());
   lastSnap = s; recvAt = performance.now();
   if (!params.get('chars') && !fromDemo) takeRules(s.chars);
   if (renderer) {
@@ -2322,13 +2328,24 @@ function step(dt) {
     updateCursor();
   }
 }
+let lastFrameMs = performance.now(), rafQueued = false, frameErrs = 0;
+function queueFrame() { rafQueued = true; requestAnimationFrame(frame); }
+// One bad frame is logged and skipped: an exception out of step() or render() used to end the loop for good (the page keeps its last picture).
 function frame() {
+  rafQueued = false; lastFrameMs = performance.now();
+  try { frameBody(); }
+  catch (err) {
+    if ((++frameErrs <= 3 || frameErrs % 200 === 0) && window.console) console.error('crew-graph frame #' + frameErrs, err);
+    if (overlay) schedule(200); else queueFrame();
+  }
+}
+function frameBody() {
   const now = nowS(), dt = Math.min(overlay ? 0.12 : 0.05, now - lastT); lastT = now;
   if (overlay && collapsed) { overlayStep(0.1, now); if (needProbe) probeHit(); schedule(400); return; } // title bar only: nothing to draw
   if (renderer) { step(dt); renderer.render(scene, camera); if (overlay) probeHit(); }
   // The pet paces itself: about 30 fps while something moves, 12 when idle (a timer, so an idle page does not wake 60 times a second).
   if (overlay) schedule((PS.reduceMotion ? (isBusy(now) ? 66 : 166) : (isBusy(now) ? 33 : 83)) - (nowS() - now) * 1000 - 3);
-  else requestAnimationFrame(frame);
+  else queueFrame();
 }
 
 /* ---------------------------------------------------------------- HUD */
@@ -2458,15 +2475,19 @@ function setChip() {
 let pollTag = null;
 function poll() {
   if (forceDemo) return;
+  if (document.hidden && !overlay && !embed) return; // a tab nobody sees renders nothing: skip the 50 KB script until it is shown again (visibilitychange)
   const old = pollTag;
   const sc = document.createElement('script');
   const done = () => { if (sc.parentNode) sc.parentNode.removeChild(sc); };
   sc.onload = done; sc.onerror = done;
-  sc.src = (petSession ? 'sessions/' + petSession + '.js' : 'data.js') + '?t=' + Date.now();
+  const src = petSession ? 'sessions/' + petSession + '.js' : overlay || embed ? 'data.js' : VC.followSource(follow, performance.now());
+  sc.src = src + '?t=' + Date.now();
   document.head.appendChild(sc);
   pollTag = sc;
   if (old && old.parentNode) old.parentNode.removeChild(old);
 }
+
+document.addEventListener('visibilitychange', () => { if (!document.hidden) poll(); });
 
 /* ---- user characters: characters-user.js is rewritten by the mod (startWeb, /crew characters reload); look again now and then */
 let userRev = String(window.__crewUserRev || '');
@@ -2748,8 +2769,14 @@ if (renderer && !embed && !preview && window.CrewTasks) {
 }
 if (preview) initPreview();
 else {
-  if (!embed) requestAnimationFrame(frame); // embedded: rendering is driven by __crewGrab, never by a continuous loop
+  if (!embed) queueFrame(); // embedded: rendering is driven by __crewGrab, never by a continuous loop
   if (!overlay) setInterval(tickHud, 250);
+  // Safety net for the browser view: no frame queued and none run for 3 s while the tab is in view means the loop ended; start it again.
+  if (!embed && !overlay) setInterval(() => {
+    if (rafQueued || document.hidden || performance.now() - lastFrameMs < 3000) return;
+    if (window.console) console.warn('crew-graph: the frame loop had stopped; restarted');
+    queueFrame();
+  }, 2000);
   setChip();
   if (embed || params.has('nohud')) document.body.classList.add('embed'); // ?nohud: no side cards (shots of the characters)
   const startData = () => {

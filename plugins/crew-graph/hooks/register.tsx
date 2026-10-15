@@ -85,6 +85,7 @@ const WEB_FILES = [
   'characters-core.js',
   'characters.js',
   'tasks.js',
+  'view-core.js',
   'pet-settings-core.js',
   'settings.html',
   'settings.js',
