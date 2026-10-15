@@ -1455,7 +1455,7 @@ if (renderer) {
     }
   };
   const cancel = () => { ptr.down = false; ptr.pet = null; if (carry) endCarry(); };
-  const lost = () => { if (carry) endCarry(); };
+  const lost = () => { ptr.down = false; ptr.pick = null; if (carry) endCarry(); };
   el.addEventListener('pointerdown', onDown); el.addEventListener('pointermove', onMove); el.addEventListener('pointerup', up);
   el.addEventListener('pointercancel', cancel); el.addEventListener('lostpointercapture', lost);
   if (plate) {
@@ -1927,6 +1927,13 @@ function overlayUp(e) {
     if (o && o.root) { pinchCrab(o); poke(); } else if (o) fileClick(o, e.shiftKey);
   }
 }
+/** Forget a press, a carry and a resize in flight: nothing is held, whatever the last events said. */
+function resetInput() {
+  ptr.down = false; ptr.pet = null; ptr.pick = null; ptr.st = null; ptr.fromPlate = false;
+  if (carry) endCarry();
+  if (sizing) { sizing = false; document.body.classList.remove('sizing'); if (pet) pet.resizeEnd(); }
+  hover = null; needProbe = true; busyUntil = Math.max(busyUntil, nowS() + 0.5); kick();
+}
 let lastOpen = { path: '', t: -9 };
 function fileClick(f, shift) {
   burst('f:' + f.path, 0xffffff, 6);
@@ -1981,13 +1988,19 @@ if (overlay) {
     // Whatever the pointer is over when the button comes up, the resize ends (capture can fail; a stuck resize would hold the window).
     window.addEventListener('pointerup', end); window.addEventListener('mouseup', end);
   }
-  window.addEventListener('blur', () => { if (carry) endCarry(); });
+  // Another app can come to the front between a press and its release (a file was just opened): the release never arrives.
+  // Whatever the page believes about the pointer is dropped on the events that say the window lost it.
+  window.addEventListener('blur', () => resetInput());
+  window.addEventListener('focus', () => resetInput());
+  window.addEventListener('pointercancel', () => resetInput(), true);
+  document.addEventListener('visibilitychange', () => resetInput());
   window.addEventListener('pointerup', () => { if (carry) endCarry(); });
   if (pet) {
     pet.onMove(petMove);
     pet.onEvent((ev) => {
       if (!ev) return;
       if (ev.type === 'hop') hopAll();
+      else if (ev.type === 'reset-input') resetInput();
       else if (ev.type === 'reset') { autoFit = true; fitPending = true; busyUntil = Math.max(busyUntil, nowS() + 1); kick(); }
       else if (ev.type === 'ticker') document.body.classList.toggle('noticker', !ev.on);
       else if (ev.type === 'collapse') { collapsed = !!ev.on; hideMore(); needProbe = true; busyUntil = Math.max(busyUntil, nowS() + 1); kick(); }

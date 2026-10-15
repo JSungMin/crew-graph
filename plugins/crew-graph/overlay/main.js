@@ -214,6 +214,51 @@ function showWin(w) {
   if (!alive(w)) return
   w.win.showInactive()
   if (!isOnScreen(w.win.getBounds())) w.win.setBounds(boundsFor(w.id))
+  raise(w)
+}
+
+// Measured on Windows 11 with the Photos app as the viewer of a png: a few seconds after shell.openPath the viewer's window
+// is above the pet's in the z-order although the pet is flagged topmost (isAlwaysOnTop() stays true). showInactive() and a
+// repeated setAlwaysOnTop(true, 'floating') leave it there; moveTop() puts the pet back and takes no focus. Why the OS
+// ranks the viewer above a topmost window is not known.
+const RAISE_EVERY_MS = 400
+const RAISE_FOR_MS = 15000
+
+/** Put the window back on top of the others, without activating it. */
+function raise(w) {
+  if (!alive(w) || !w.win.isVisible()) return
+  try {
+    w.win.moveTop()
+  } catch {
+    /* a window that is going away */
+  }
+}
+
+/** A viewer takes a second or two to come up: keep the pet on top for a while after something was handed to the OS. */
+function raiseFor(w, ms = RAISE_FOR_MS) {
+  if (!alive(w)) return
+  clearInterval(w.raiseTimer)
+  const until = Date.now() + ms
+  if (onTop) raise(w)
+  w.raiseTimer = setInterval(() => {
+    if (!alive(w) || Date.now() > until) return clearInterval(w.raiseTimer)
+    if (onTop) raise(w)
+  }, RAISE_EVERY_MS)
+}
+
+/**
+ * Hand something to the OS (open a file, show it in the folder): the press that started it may never get its release
+ * once another app is in front, so any gesture is ended and the page forgets its pointer state; and the pet stays on top.
+ */
+function runAction(w, run) {
+  stopGesture(w)
+  sendTo(w, { type: 'reset-input' })
+  if (onTop) raiseFor(w)
+  return run().then(r => {
+    dbg(`action ${r}`)
+    sendTo(w, { type: 'reset-input' })
+    return r
+  })
 }
 
 function setOnTop(v) {
@@ -267,6 +312,7 @@ function closeWindow(id) {
   wins.delete(id)
   stopGesture(w, true)
   clearInterval(w.cursorTimer)
+  clearInterval(w.raiseTimer)
   if (alive(w)) {
     byContents.delete(w.win.webContents.id)
     w.win.destroy()
@@ -379,11 +425,16 @@ async function createWindow(id, orca) {
   win.showInactive()
   win.on('moved', saveState)
   win.on('resized', saveState)
+  win.on('show', () => sendTo(w, { type: 'reset-input' }))
+  win.on('restore', () => {
+    sendTo(w, { type: 'reset-input' })
+    raise(w)
+  })
   // The page asks for forwarded mouse moves while it lets clicks through. This is a second source for the
   // cursor, a few times a second and only while click-through is on, in case those do not arrive.
   if (!isScratch) {
     w.cursorTimer = setInterval(() => {
-      if (!alive(w) || !w.ignoring || w.gesture || !w.win.isVisible()) return
+      if (!alive(w) || w.gesture || !w.win.isVisible()) return
       const c = screen.getCursorScreenPoint()
       const b = w.win.getBounds()
       const x = c.x - b.x
@@ -392,6 +443,9 @@ async function createWindow(id, orca) {
       const key = inside ? `${x},${y}` : 'out'
       if (key === w.cursor) return
       w.cursor = key
+      // While the window takes clicks the page sees its own moves; only the cursor leaving needs telling (a window that was
+      // covered gets no leave event of its own, and would keep taking clicks over its whole rectangle).
+      if (!w.ignoring && inside) return
       sendTo(w, { type: 'cursor', x: inside ? x : -1, y: inside ? y : -1 })
     }, 125)
   }
@@ -461,8 +515,8 @@ function menuFor(w, ctx) {
   const items = []
   if (ctx.kind === 'file') {
     items.push(
-      { label: 'Open', click: () => void w.actions.open(ctx.abs).then(r => dbg(`open ${r}`)) },
-      { label: 'Show in folder', click: () => void w.actions.reveal(ctx.abs).then(r => dbg(`reveal ${r}`)) },
+      { label: 'Open', click: () => void runAction(w, () => w.actions.open(ctx.abs)) },
+      { label: 'Show in folder', click: () => void runAction(w, () => w.actions.reveal(ctx.abs)) },
       { label: 'Show in Crew pane', click: () => focusFile(w, ctx.abs) },
       {
         label: 'Copy path',
@@ -584,8 +638,8 @@ function wireIpc() {
     if (kind === 'file' && !w.actions.resolve(ctx.abs)) return menuFor(w, {}).popup({ window: w.win })
     menuFor(w, { kind, id: ctx.id, abs: ctx.abs }).popup({ window: w.win })
   })
-  on('pet:open', (w, abs) => void w.actions.open(abs).then(r => dbg(`open ${r}`)))
-  on('pet:reveal', (w, abs) => void w.actions.reveal(abs).then(r => dbg(`reveal ${r}`)))
+  on('pet:open', (w, abs) => void runAction(w, () => w.actions.open(abs)))
+  on('pet:reveal', (w, abs) => void runAction(w, () => w.actions.reveal(abs)))
   ipcMain.handle('pet:summary', (e, abs) => {
     const w = of(e)
     if (!w) return { error: 'sender' }
